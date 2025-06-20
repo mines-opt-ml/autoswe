@@ -1,7 +1,9 @@
 from dataclasses import dataclass
+
 import torch
 
-#This is styled similar to Antony's Lattice work
+
+# This is styled similar to Antony's Lattice work
 @dataclass
 class SWEConfig:
     def __init__(
@@ -9,7 +11,7 @@ class SWEConfig:
         swe_path,
         meta_path,
         sample_date,
-        #below are mostly defaults for hyperparameters; can be adjusted later
+        # below are mostly defaults for hyperparameters; can be adjusted later
         hidden_dims=[128, 64],
         batch_size=1000,
         lr=0.001,
@@ -19,8 +21,8 @@ class SWEConfig:
         nugget=0.01,
         M=30,
         ncores=1,
-        device=torch.device("cpu"),  #could be cuda
-        shuffle=True, 
+        device=torch.device("cpu"),  # could be cuda
+        shuffle=True,
     ):
         self.swe_path = swe_path
         self.meta_path = meta_path
