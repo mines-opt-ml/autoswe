@@ -1,0 +1,16 @@
+swe_path: data/SWE_data_CONUS.csv
+meta_path: data/Snotel_Locations_Filtered_v3.csv
+sample_date: "1/5/2000"
+hidden_dims: [128, 64]
+batch_size: 1000
+lr: 0.001
+n_epochs: 100
+smoothness: 0.5
+range_param: 1.0
+nugget: 0.01
+M: 30
+ncores: 1
+device: cpu
+shuffle: true
+save: true
+save_path: results/model.pt

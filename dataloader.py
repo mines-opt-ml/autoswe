@@ -79,4 +79,4 @@ class SWEDataLoader:
         train_loader = DataLoader(train_dataset, batch_size=self.cfg.batch_size, shuffle=self.cfg.shuffle)
         val_loader = DataLoader(val_dataset, batch_size=self.cfg.batch_size)
 
-        return train_loader, val_loader, transformer, val_df
+        return train_loader, val_loader, transformer, val_df, spatial_obj
