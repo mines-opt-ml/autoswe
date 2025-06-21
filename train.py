@@ -41,6 +41,7 @@ def train_model(cfg): #Matches practice of passing train_loader into SWEConfig f
         model.eval()
         preds_all, y_all = [], []
         with torch.no_grad():
+            # Call validation/test function that incorporates inverse spatial transform.
             for X, y in val_loader:
                 X = X.to(device)
                 preds_all.append(model(X).cpu().numpy())
