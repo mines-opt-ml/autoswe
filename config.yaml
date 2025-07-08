@@ -1,6 +1,13 @@
 swe_path: data/SWE_data_CONUS.csv
 meta_path: data/Snotel_Locations_Filtered_v3.csv
-sample_date: "1/5/2000"
+max_temp_path: data/Maximum_temperature_CONUS.csv
+min_temp_path: data/Minimum_temperature_CONUS.csv
+precip_path: data/Precip_data_CONUS.csv
+obs_temp_path: data/Temperature_observed_CONUS.csv
+tb19_path: data/TB_19_VE_CONUS.csv
+tb37_path: data/TB_37_VE_CONUS.csv
+tbdiff_path: data/TB_diff_37_19_VE_CONUS.csv
+sample_date: "2010-04-01"
 hidden_dims: [128, 64]
 batch_size: 1000
 lr: 0.001
