@@ -16,8 +16,7 @@ with open("config.yaml", "r") as f:
 cfg = SimpleNamespace(**cfg_dict)
 cfg.device = torch.device(cfg.device) 
 
-#model weights - dim=7 to reflect parameters (lat, long, slope, elevation, aspect, day,)
-model = SWE_Net(input_dim=7, hidden_dims=cfg.hidden_dims).to(cfg.device)
+model = SWE_Net(input_dim=14, hidden_dims=cfg.hidden_dims).to(cfg.device)
 model.load_state_dict(torch.load(cfg.save_path, map_location=cfg.device))
 model.eval()
 
@@ -43,15 +42,15 @@ val_df = val_df.copy()
 val_df["Predicted_SWE"] = y_pred_spatial
 val_df["True_SWE"] = targets
 
-#plt.figure(figsize=(8, 6))
-#plt.scatter(val_df["True_SWE"], val_df["Predicted_SWE"], alpha=0.6)
-#plt.plot([0, max(val_df["True_SWE"])], [0, max(val_df["True_SWE"])], 'r--')
-#plt.xlabel("True SWE (in)")
-#plt.ylabel("Predicted SWE (in)")
-#plt.title(f"SWE Prediction Accuracy\n{cfg.sample_date}")
-#plt.grid(True)
-#plt.tight_layout()
-#plt.show()
+plt.figure(figsize=(8, 6))
+plt.scatter(val_df["True_SWE"], val_df["Predicted_SWE"], alpha=0.6)
+plt.plot([0, max(val_df["True_SWE"])], [0, max(val_df["True_SWE"])], 'r--')
+plt.xlabel("True SWE (in)")
+plt.ylabel("Predicted SWE (in)")
+plt.title(f"SWE Prediction Accuracy\n{cfg.sample_date}")
+plt.grid(True)
+plt.tight_layout()
+plt.show()
 
 usa = gpd.read_file(gplt.datasets.get_path("contiguous_usa"))
 
@@ -84,4 +83,4 @@ x_margin = (maxx - minx) * 0.05
 y_margin = (maxy - miny) * 0.05  
 ax.set_xlim(minx - x_margin, maxx + x_margin)
 ax.set_ylim(miny - y_margin, maxy + y_margin)
-plt.show()
+#plt.show()
