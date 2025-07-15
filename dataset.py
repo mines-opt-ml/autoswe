@@ -28,6 +28,8 @@ class SWEStationDataset(Dataset):
         meta = self._load_meta_data()
         dynamic_merged = self._load_dynamic_forcing_data()
         self.merged = self._merge_data(swe_long, dynamic_merged, meta)
+        if self.cfg.spatial_transform is not None:
+            self.merged = self.apply_spatial_transform(self.merged)
 
     ### Loading functions
     def _load_swe_values(self) -> pd.DataFrame:
