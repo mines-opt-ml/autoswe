@@ -6,3 +6,8 @@
 # dynamic_features of shape (num_dynamic_fields, num_stations, num_days)
 # static_features of shape (num_static_fields, num_stations)
 # fields = {Elevation, Slope, ... , SWE, Station_name}
+# ideally, this file shpuld only be run once and the data should be saved.
+
+
+
+if __name__ == "__main__":
