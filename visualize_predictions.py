@@ -4,7 +4,7 @@ import geopandas as gpd
 import pandas as pd
 from modelzoo.NeuralNet import SWE_Net
 from dataloader import SWEDataLoader
-from utils import back_transform_predictions
+from utils.utils import back_transform_predictions
 import numpy as np
 import geoplot as gplt
 import geoplot.crs as gcrs

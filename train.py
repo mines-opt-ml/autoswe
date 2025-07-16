@@ -6,7 +6,7 @@ from modelzoo.NeuralNet import SWE_Net
 from sklearn.metrics import mean_squared_error
 import numpy as np
 from SpatialTransform import SpatialTransformer  
-from utils import back_transform_predictions
+from utils.utils import back_transform_predictions
 import yaml
 from types import SimpleNamespace
 
