@@ -6,11 +6,12 @@ from scipy.linalg import cholesky
 import mknnIndx
 import matern
 from scipy.linalg import cholesky
+from typing import Any
 
 
 def process_row(
-    idx, ytrain, Xtrain, trainLocs, nnList, smoothness, range_param, nugget
-):
+    idx: int, ytrain: pd.Series, Xtrain: pd.DataFrame, trainLocs: np.ndarray, nnList: list[list[int]], smoothness: float, range_param: float, nugget: float
+) -> dict[str, Any]:
     if idx == 0:
         y = ytrain.iloc[idx]
         w = 1
@@ -37,8 +38,8 @@ def process_row(
 
 
 def process_test_data(
-    idx, testLocs, trainLocs, Xtest, Xtrain, ytrain, nugget, range_param, smoothness, M
-):
+    idx: int, testLocs: np.ndarray, trainLocs: np.ndarray, Xtest: pd.DataFrame, Xtrain: pd.DataFrame, ytrain: pd.Series, nugget: float, range_param: float, smoothness: float, M: int
+) -> dict[str, Any]:
 
     # Distance between test location and training locations
     D = cdist(testLocs[idx].reshape(1, -1), trainLocs)
@@ -74,22 +75,22 @@ def process_test_data(
 
 
 class SpatialTransformer:
-    def __init__(self):
+    def __init__(self) -> None:
         pass
 
     def transform_to_ind(
         self,
-        target,
-        trainData,
-        trainLocs,
-        testData,
-        testLocs,
-        smoothness=0.5,
-        range_param=1,
-        nugget=0.01,
-        M=30,
-        ncores=1,
-    ):
+        target: str,
+        trainData: pd.DataFrame,
+        trainLocs: np.ndarray,
+        testData: pd.DataFrame,
+        testLocs: np.ndarray,
+        smoothness: float = 0.5,
+        range_param: float = 1.0,
+        nugget: float = 0.01,
+        M: int = 30,
+        ncores: int = 1
+    ) -> dict[str, Any]:
 
         nnList = mknnIndx.mkNNindx(trainLocs, M)
 
@@ -153,7 +154,8 @@ class SpatialTransformer:
 
         return outList
 
-    def back_transform_to_spatial(self, preds, transformObj):
+    def back_transform_to_spatial(self, preds: np.ndarray, transformObj: dict[str, Any]
+    ) -> np.ndarray:
         spatialPreds = (
             preds
             * np.array(list(map(lambda x: x["w"], transformObj["backTransformInfo"])))
