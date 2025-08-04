@@ -29,5 +29,6 @@ class SWEStationDataset(Dataset):
         return self.X[idx], self.y[idx] 
 
     def _get_(self):
+        raise NotImplementedError
         
         
