@@ -1,5 +1,7 @@
-import pandas as pd
 from functools import reduce
+from typing import Tuple
+import pandas as pd
+
 
 def melt_dynamic(path: str, var_name: str) -> pd.DataFrame:
     df = pd.read_csv(path)
@@ -8,7 +10,8 @@ def melt_dynamic(path: str, var_name: str) -> pd.DataFrame:
     df_long["Station"] = df_long["Station"].str.replace("_", " ").str.lower()
     return df_long
 
-def preprocess(cfg: object) -> pd.DataFrame:
+
+def preprocess(cfg: object) -> Tuple[pd.DataFrame, pd.DataFrame]
     swe = pd.read_csv(cfg.swe_path)
     swe["Date"] = pd.to_datetime(swe["Date"]).dt.strftime("%Y-%m-%d")
     swe_long = swe.melt(id_vars="Date", var_name="Station", value_name="SWE")
@@ -24,16 +27,16 @@ def preprocess(cfg: object) -> pd.DataFrame:
         (cfg.obs_temp_path, "Tobs"),
         (cfg.tb19_path, "TB_19"),
         (cfg.tb37_path, "TB_37"),
-        (cfg.tbdiff_path, "TB_diff")
+        (cfg.tbdiff_path, "TB_diff"),
     ]
 
     dynamic_dfs = [melt_dynamic(path, name) for path, name in dynamic_inputs]
     dynamic_merged = reduce(lambda left, right: pd.merge(left, right, on=["Date", "Station"]), dynamic_dfs)
 
     merged = pd.merge(swe_long, dynamic_merged, on=["Date", "Station"], how="inner")
-    merged = pd.merge(merged, meta, left_on="Station", right_on="Station_clean", how="inner")
+    # merged = pd.merge(merged, meta, left_on="Station", right_on="Station_clean", how="inner")
     merged = merged.rename(columns={"Station_clean": "Station"})
-    merged = merged.dropna()
+    dynamic_forcing_and_swe = merged.dropna()
+    snotel_attributes = meta.rename(columns={"Station Name": "Station"})
 
-
-    return merged
+    return dynamic_forcing_and_swe, snotel_attributes
