@@ -9,7 +9,7 @@ class SWEStationDataset(Dataset):
     where X is the features and y is the target SWE value.
     Windoow_length is the length of a snow year.
     '''
-    def __init__(self, cfg: ):
+    def __init__(self, cfg):
         super(SWEStationDataset, self).__init__()
         self.cfg = cfg
         # self.X = torch.tensor(X, dtype=torch.float32)
@@ -20,12 +20,13 @@ class SWEStationDataset(Dataset):
         self.end_year = self.cfg.end_year
         self._get_start_and_end_dates() # Todo: implement this method. Should read these dates from the config
     
-
+    # Add stuff from dataloader
+    # and also slice time series into water year
 
     def __len__(self):
         return len(self.X) 
 
-    def __getitem__(self, idx: int):
+    def __getitem__(self, idx: int): #should return time series of all forcings for a given snotel from beginning of snow year to peak swe date
         return self.X[idx], self.y[idx] 
 
     def _get_(self):
