@@ -5,6 +5,7 @@ from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader
 from utils.preprocess import preprocess
 from utils.SpatialTransform import SpatialTransformer
+from dataset import SWEStationDataset
 
 
 class SWEDataLoader:
@@ -19,11 +20,11 @@ class SWEDataLoader:
         def build_features(df):
             return pd.DataFrame(
                 {
-                    "Elevation": df["Elevation_x"],
-                    "Slope": df["Slope_tif1_x"],
-                    "Aspect": df["Aspect_tif_x"],
-                    "Latitude": df["Latitude_x"],
-                    "Longitude": df["Longitude_x"],
+                    "Elevation": df["Elevation"],
+                    "Slope": df["Slope"],
+                    "Aspect": df["Aspect"],
+                    "Latitude": df["Latitude"],
+                    "Longitude": df["Longitude"],
                     "DayOfYear": pd.to_datetime(df["Date"]).dt.dayofyear,
                     "Tmax": df["Tmax"],
                     "Tmin": df["Tmin"],
