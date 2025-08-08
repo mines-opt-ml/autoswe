@@ -7,7 +7,7 @@ obs_temp_path: data/Temperature_observed_CONUS.csv
 tb19_path: data/TB_19_VE_CONUS.csv
 tb37_path: data/TB_37_VE_CONUS.csv
 tbdiff_path: data/TB_diff_37_19_VE_CONUS.csv
-sample_date: "2001-01-05" #not sure this is needed
+#sample_date: "2001-01-05" #not sure this is needed
 beginning_of_snow_year: "10-01"
 peak_swe_date: "04-01"
 beginning_year: 2001
