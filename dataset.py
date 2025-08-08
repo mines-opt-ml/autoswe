@@ -1,7 +1,9 @@
 from typing import Dict, Tuple
+
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
+
 from utils.preprocess import preprocess
 
 
@@ -49,7 +51,7 @@ class SWEStationDataset(Dataset):
     def _create_lookup_table(self):
         lookup = []
         stations = self.dynamic_forcing_and_swe["Station"].drop_duplicates().values
-        
+
         for year in range(self.beginning_year, self.end_year - 1):
             for station in stations:
                 lookup.append(
@@ -57,7 +59,7 @@ class SWEStationDataset(Dataset):
                         "Station": station,
                         "Year": year,
                         "StartDate": pd.to_datetime(f"{year}-{self.beginning_of_snow_year}"),
-                        "PeakSWEDate": pd.to_datetime(f"{year+1}-{self.peak_swe_date}"),
+                        "PeakSWEDate": pd.to_datetime(f"{year + 1}-{self.peak_swe_date}"),
                     }
                 )
         return lookup
@@ -67,9 +69,9 @@ class SWEStationDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         station = self.lookup_table[idx]["Station"]
-        year = self.lookup_table[idx]["Year"]
         start_date = self.lookup_table[idx]["StartDate"]
         peak_swe_date = self.lookup_table[idx]["PeakSWEDate"]
+        year = self.lookup_table[idx]["Year"]
 
         sample = {}
         mask = (
@@ -83,43 +85,47 @@ class SWEStationDataset(Dataset):
         if len(data) == 0:
             raise ValueError(f"No data found for station {station} between {start_date} and {peak_swe_date}")
 
-        features = pd.DataFrame({
-            "Elevation": data["Elevation_x"],
-            "Slope": data["Slope_tif1_x"],
-            "Aspect": data["Aspect_tif_x"],
-            "Latitude": data["Latitude_x"],
-            "Longitude": data["Longitude_x"],
-            "DayOfYear": pd.to_datetime(data["Date"]).dt.dayofyear,
-            "Tmax": data["Tmax"],
-            "Tmin": data["Tmin"],
-            "Precip": data["Precip"],
-            "Tobs": data["Tobs"],
-            "TB_19": data["TB_19"],
-            "TB_37": data["TB_37"],
-            "TB_diff": data["TB_diff"],
-        })
+        features = pd.DataFrame(
+            {
+                "Elevation": data["Elevation_x"],
+                "Slope": data["Slope_tif1_x"],
+                "Aspect": data["Aspect_tif_x"],
+                "Latitude": data["Latitude_x"],
+                "Longitude": data["Longitude_x"],
+                "DayOfYear": pd.to_datetime(data["Date"]).dt.dayofyear,
+                "Tmax": data["Tmax"],
+                "Tmin": data["Tmin"],
+                "Precip": data["Precip"],
+                "Tobs": data["Tobs"],
+                "TB_19": data["TB_19"],
+                "TB_37": data["TB_37"],
+                "TB_diff": data["TB_diff"],
+            }
+        )
 
         sample["dynamic forcing"] = torch.tensor(features.values, dtype=torch.float32)
         sample["swe"] = torch.tensor(data["SWE"].values, dtype=torch.float32)
         station_mask = self.snotel_attributes["Station"] == station
         attrs = self.snotel_attributes[["Elevation", "Slope", "Aspect"]].values
         sample["snotel attributes"] = torch.tensor(attrs, dtype=torch.float32)
+        sample["year"] = year  # NB: This is not a torch.tensor, so can't be sent to GPU
+        sample["station"] = station  # NB: This is not a torch.tensor, so can't be sent to GPU
 
         return sample
 
     def get(self, station: str, year: int) -> Dict[str, torch.Tensor]:
         """
         Get data for a specific station and year.
-        
+
         Args:
             station: Station identifier
             year: Year to retrieve data for
-            
+
         Returns:
             Dictionary containing dynamic forcing, SWE, and station attributes
         """
         for idx, entry in enumerate(self.lookup_table):
             if entry["Station"] == station and entry["Year"] == year:
                 return self.__getitem__(idx)
-                
+
         raise ValueError(f"No data found for station {station} and year {year}")
