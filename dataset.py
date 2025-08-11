@@ -1,9 +1,7 @@
 from typing import Dict, Tuple
-
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
-
 from utils.preprocess import preprocess
 
 
@@ -45,8 +43,8 @@ class SWEStationDataset(Dataset):
             }
         )
 
-    def prepare(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        dynamic_forcing_and_swe, snotel_attributes = preprocess(self.cfg)
+    #def prepare(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        #dynamic_forcing_and_swe, snotel_attributes = preprocess(self.cfg)
 
     def _create_lookup_table(self):
         lookup = []
@@ -106,7 +104,7 @@ class SWEStationDataset(Dataset):
         sample["dynamic forcing"] = torch.tensor(features.values, dtype=torch.float32)
         sample["swe"] = torch.tensor(data["SWE"].values, dtype=torch.float32)
         station_mask = self.snotel_attributes["Station"] == station
-        attrs = self.snotel_attributes[["Elevation", "Slope", "Aspect"]].values
+        attrs = self.snotel_attributes.loc[station_mask, ["Elevation", "Slope", "Aspect"]].values
         sample["snotel attributes"] = torch.tensor(attrs, dtype=torch.float32)
         sample["year"] = year  # NB: This is not a torch.tensor, so can't be sent to GPU
         sample["station"] = station  # NB: This is not a torch.tensor, so can't be sent to GPU
