@@ -36,12 +36,16 @@ def preprocess(cfg: object) -> Tuple[pd.DataFrame, pd.DataFrame]:
     merged = pd.merge(merged, meta, left_on="Station", right_on="Station_clean", how="inner")
     dynamic_forcing_and_swe = merged.dropna()
     
-    snotel_attributes = meta[["Station Name", "Elevation_x", "Slope_tif1_x", "Aspect_tif_x"]].copy()
+    snotel_attributes = meta[["Station Name", "Elevation_x", "Slope_tif1_x", "Aspect_tif_x", "Latitude_x", "Longitude_x"]].copy()
+
     snotel_attributes = snotel_attributes.rename(columns={
         "Station Name": "Station",
         "Elevation_x": "Elevation",
         "Slope_tif1_x": "Slope",
-        "Aspect_tif_x": "Aspect"
+        "Aspect_tif_x": "Aspect",
+        "Latitude_x": "Latitude",
+        "Longitude_x": "Longitude",
     })
+    snotel_attributes["Station"] = snotel_attributes["Station"].str.lower()
 
     return dynamic_forcing_and_swe, snotel_attributes

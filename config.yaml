@@ -7,11 +7,12 @@ obs_temp_path: data/Temperature_observed_CONUS.csv
 tb19_path: data/TB_19_VE_CONUS.csv
 tb37_path: data/TB_37_VE_CONUS.csv
 tbdiff_path: data/TB_diff_37_19_VE_CONUS.csv
-#sample_date: "2001-01-05" #not sure this is needed
 beginning_of_snow_year: "10-01"
 peak_swe_date: "04-01"
 beginning_year: 2001
 end_year: 2019
+train_end_year: 2014    
+val_start_year: 2015    
 hidden_dims: [128, 64]
 batch_size: 1000
 lr: 0.001
@@ -19,7 +20,7 @@ n_epochs: 100
 smoothness: 0.5
 range_param: 1.0
 nugget: 0.01
-M: 30
+M: 10
 ncores: 1
 device: cpu
 shuffle: true

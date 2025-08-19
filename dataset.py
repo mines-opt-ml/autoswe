@@ -85,6 +85,8 @@ class SWEStationDataset(Dataset):
 
         features = pd.DataFrame(
             {
+                "Station": data["Station"],
+                "Date": data["Date"],   
                 "Elevation": data["Elevation_x"],
                 "Slope": data["Slope_tif1_x"],
                 "Aspect": data["Aspect_tif_x"],
@@ -103,6 +105,7 @@ class SWEStationDataset(Dataset):
 
         sample["dynamic forcing"] = torch.tensor(features.values, dtype=torch.float32)
         sample["swe"] = torch.tensor(data["SWE"].values, dtype=torch.float32)
+        sample["dates"] = data["Date"].dt.strftime("%Y-%m-%d").values
         station_mask = self.snotel_attributes["Station"] == station
         attrs = self.snotel_attributes.loc[station_mask, ["Elevation", "Slope", "Aspect"]].values
         sample["snotel attributes"] = torch.tensor(attrs, dtype=torch.float32)
