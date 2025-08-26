@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from dataloader import SWEDataLoader
+from dataloader import SWEDataLoader, SWEStationDataset
 from modelzoo.NeuralNet import SWE_Net
 from sklearn.metrics import mean_squared_error
 from utils.backtransform import back_transform_scalar_with_weights
@@ -15,6 +15,10 @@ import os
 
 def train_model(cfg: SimpleNamespace) -> SWE_Net:
     device = torch.device(cfg.device)
+    
+    dataset = SWEStationDataset(cfg)
+    orig_swe = dataset.dynamic_forcing_and_swe.reset_index()
+    swe_lookup = orig_swe.set_index(['Station', 'Date'])['SWE']
     
     dataloader = SWEDataLoader(cfg)
     train_loader, val_loader, _, bt_info = dataloader.prepare()
@@ -56,7 +60,6 @@ def train_model(cfg: SimpleNamespace) -> SWE_Net:
         with torch.no_grad():
             for batch in val_loader:
                 X = batch["dynamic forcing"].to(device)
-                y = batch["swe"]
                 mask = batch["mask"]
                 stations = batch["station"]
                 dates = batch["dates"]
@@ -81,7 +84,7 @@ def train_model(cfg: SimpleNamespace) -> SWE_Net:
                                 backtrans_cache=backtrans_cache
                             )
                             
-                            actual_swe = y[i, t].item()
+                            actual_swe = swe_lookup.loc[(station, date_str)]
                             
                             if epoch == cfg.n_epochs - 1:
                                 all_predictions.append({

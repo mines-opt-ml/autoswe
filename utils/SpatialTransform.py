@@ -6,11 +6,10 @@ from joblib import Parallel, delayed
 from scipy.linalg import cholesky
 from . import mknnIndx
 from . import matern
-from scipy.linalg import cholesky
 from typing import Any
 from dataclasses import dataclass
 
-## NEW CODE BELOW
+## NEW CODE
 
 @dataclass
 class PrecomputedWeights:
