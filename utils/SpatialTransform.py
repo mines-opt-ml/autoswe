@@ -1,27 +1,26 @@
+from dataclasses import dataclass
+from typing import Any
+
 import numpy as np
 import pandas as pd
-from scipy.spatial.distance import cdist
-from scipy.spatial import cKDTree
 from joblib import Parallel, delayed
 from scipy.linalg import cholesky
-from . import mknnIndx
-from . import matern
-from typing import Any
-from dataclasses import dataclass
+from scipy.spatial import cKDTree
+from scipy.spatial.distance import cdist
 
-## NEW CODE
+from . import matern, mknnIndx
+
+## NEW CODE BELOW
+
 
 @dataclass
 class PrecomputedWeights:
-    nn_index: np.ndarray  
-    A: np.ndarray         
-    w: np.ndarray       
+    nn_index: np.ndarray
+    A: np.ndarray
+    w: np.ndarray
 
-def precompute_weights(trainLocs: np.ndarray,
-                       M: int,
-                       range_param: float,
-                       smoothness: float,
-                       nugget: float) -> PrecomputedWeights:
+
+def precompute_weights(trainLocs: np.ndarray, M: int, range_param: float, smoothness: float, nugget: float) -> PrecomputedWeights:
     """
     Precompute per-station neighbor weights (a_i) and scalars (w_i) once.
     """
@@ -31,39 +30,38 @@ def precompute_weights(trainLocs: np.ndarray,
     M_eff = int(min(M, max(1, N - 1)))
 
     tree = cKDTree(trainLocs)
-    dists, inds = tree.query(trainLocs, k=M_eff + 1)
-    nn_index = inds[:, 1:].astype(np.int64)   
+    _, inds = tree.query(trainLocs, k=M_eff + 1)
+    nn_index = inds[:, 1:].astype(np.int64)
 
     A = np.empty((N, M_eff), dtype=np.float32)
-    w = np.empty((N,),       dtype=np.float32)
+    w = np.empty((N,), dtype=np.float32)
 
     for i in range(N):
-        nbrs = nn_index[i]                         
-        idxs = np.concatenate(([i], nbrs))          
+        nbrs = nn_index[i]
+        idxs = np.concatenate(([i], nbrs))
         locs = trainLocs[idxs]
         D = cdist(locs, locs)
 
         K = matern.Matern(D, range_param, smoothness, phi=1.0).astype(np.float32)
         R = (1.0 - nugget) * K + nugget * np.eye(M_eff + 1, dtype=np.float32)
 
-        chol = cholesky(R[1:, 1:], lower=False)     
+        chol = cholesky(R[1:, 1:], lower=False)
         t = np.linalg.solve(chol.T, R[0, 1:])
-        a = np.linalg.solve(chol, t).astype(np.float32)    
+        a = np.linalg.solve(chol, t).astype(np.float32)
 
         A[i, :] = a
         w[i] = np.float32(1.0 - a @ R[1:, 0])
 
     return PrecomputedWeights(nn_index=nn_index, A=A, w=w)
 
-def fast_transform_with_weights(trainData: pd.DataFrame,
-                                target: str,
-                                weights: PrecomputedWeights) -> pd.DataFrame:
+
+def fast_transform_with_weights(trainData: pd.DataFrame, target: str, weights: PrecomputedWeights) -> pd.DataFrame:
     """
     Apply spatial transform with precomputed weights.
     """
-    
-    y = trainData[target].to_numpy(dtype=np.float32)                
-    X = trainData.drop(columns=[target]).to_numpy(dtype=np.float32)  
+
+    y = trainData[target].to_numpy(dtype=np.float32)
+    X = trainData.drop(columns=[target]).to_numpy(dtype=np.float32)
 
     N = X.shape[0]
     M = weights.nn_index.shape[1]
@@ -72,8 +70,8 @@ def fast_transform_with_weights(trainData: pd.DataFrame,
     y_out = np.empty_like(y, dtype=np.float32)
 
     for i in range(N):
-        a = weights.A[i]                       
-        nbrs = weights.nn_index[i]         
+        a = weights.A[i]
+        nbrs = weights.nn_index[i]
         denom = np.sqrt(weights.w[i]).astype(np.float32)
 
         y_out[i] = (y[i] - np.dot(a, y[nbrs])) / denom
@@ -82,19 +80,25 @@ def fast_transform_with_weights(trainData: pd.DataFrame,
     cols = list(trainData.drop(columns=[target]).columns)
     out = pd.DataFrame(np.column_stack([y_out, X_out]), columns=[target] + cols)
 
-    
     return out
 
+
 def process_row(
-    idx: int, ytrain: pd.Series, Xtrain: pd.DataFrame, trainLocs: np.ndarray,
-    nnList: list[list[int]], smoothness: float, range_param: float, nugget: float
+    idx: int,
+    ytrain: pd.Series,
+    Xtrain: pd.DataFrame,
+    trainLocs: np.ndarray,
+    nnList: list[list[int]],
+    smoothness: float,
+    range_param: float,
+    nugget: float,
 ) -> dict[str, Any]:
     if idx == 0:
         y = ytrain.iloc[idx]
         w = 1.0
         X = Xtrain.iloc[idx] / np.sqrt(w)
     else:
-        locs = (trainLocs[: idx + 1] if idx == 1 else trainLocs[np.append(idx, nnList[idx])])
+        locs = trainLocs[: idx + 1] if idx == 1 else trainLocs[np.append(idx, nnList[idx])]
         D = cdist(locs, locs)
         covariance_matrix = matern.Matern(D, range_param, smoothness, phi=1.0)
         R = (1 - nugget) * covariance_matrix + (nugget * np.eye(D.shape[0]))
@@ -109,12 +113,22 @@ def process_row(
 
     return {"y": y, "X": X, "w": w}
 
+
 # End of NEW CODE
 
-def process_test_data(
-    idx: int, testLocs: np.ndarray, trainLocs: np.ndarray, Xtest: pd.DataFrame, Xtrain: pd.DataFrame, ytrain: pd.Series, nugget: float, range_param: float, smoothness: float, M: int
-) -> dict[str, Any]:
 
+def process_test_data(
+    idx: int,
+    testLocs: np.ndarray,
+    trainLocs: np.ndarray,
+    Xtest: pd.DataFrame,
+    Xtrain: pd.DataFrame,
+    ytrain: pd.Series,
+    nugget: float,
+    range_param: float,
+    smoothness: float,
+    M: int,
+) -> dict[str, Any]:
     # Distance between test location and training locations
     D = cdist(testLocs[idx].reshape(1, -1), trainLocs)
     # Find the M nearest neighbors
@@ -163,9 +177,8 @@ class SpatialTransformer:
         range_param: float = 1.0,
         nugget: float = 0.01,
         M: int = 30,
-        ncores: int = 1
+        ncores: int = 1,
     ) -> dict[str, Any]:
-
         nnList = mknnIndx.mkNNindx(trainLocs, M)
 
         ytrain = trainData[target]
@@ -181,9 +194,7 @@ class SpatialTransformer:
         n_samples = len(Xtrain)
 
         indData = Parallel(n_jobs=ncores)(
-            delayed(process_row)(
-                idx, ytrain, Xtrain, trainLocs, nnList, smoothness, range_param, nugget
-            )
+            delayed(process_row)(idx, ytrain, Xtrain, trainLocs, nnList, smoothness, range_param, nugget)
             for idx in range(n_samples)
         )
 
@@ -203,15 +214,9 @@ class SpatialTransformer:
             for idx in range(len(Xtest))
         )
 
-        trainData_y = pd.DataFrame(
-            np.vstack([x["y"] for x in indData]), columns=[target]
-        )
-        trainData_X = pd.DataFrame(
-            np.vstack([x["X"] for x in indData]), columns=trainData_columns
-        )
-        testData_X = pd.DataFrame(
-            np.vstack([x["X"] for x in indTestData]), columns=testData_columns
-        )
+        trainData_y = pd.DataFrame(np.vstack([x["y"] for x in indData]), columns=[target])
+        trainData_X = pd.DataFrame(np.vstack([x["X"] for x in indData]), columns=trainData_columns)
+        testData_X = pd.DataFrame(np.vstack([x["X"] for x in indTestData]), columns=testData_columns)
 
         trainData_combined = pd.concat([trainData_y, trainData_X], axis=1)
 
@@ -221,19 +226,13 @@ class SpatialTransformer:
             "range": range_param,
             "nugget": nugget,
             "M": M,
-            "backTransformInfo": [
-                {"w": x["w"], "backTrans": x["backTrans"]} for x in indTestData
-            ],
+            "backTransformInfo": [{"w": x["w"], "backTrans": x["backTrans"]} for x in indTestData],
         }
 
         return outList
 
-    def back_transform_to_spatial(self, preds: np.ndarray, transformObj: dict[str, Any]
-    ) -> np.ndarray:
-        spatialPreds = (
-            preds
-            * np.array(list(map(lambda x: x["w"], transformObj["backTransformInfo"])))
-        ) + np.array(
+    def back_transform_to_spatial(self, preds: np.ndarray, transformObj: dict[str, Any]) -> np.ndarray:
+        spatialPreds = (preds * np.array(list(map(lambda x: x["w"], transformObj["backTransformInfo"])))) + np.array(
             list(map(lambda x: x["backTrans"], transformObj["backTransformInfo"]))
         )
 
