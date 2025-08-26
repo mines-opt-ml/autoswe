@@ -1,41 +1,116 @@
 import numpy as np
 import pandas as pd
 from scipy.spatial.distance import cdist
+from scipy.spatial import cKDTree
 from joblib import Parallel, delayed
 from scipy.linalg import cholesky
-import mknnIndx
-import matern
+from . import mknnIndx
+from . import matern
 from scipy.linalg import cholesky
 from typing import Any
+from dataclasses import dataclass
 
+## NEW CODE BELOW
+
+@dataclass
+class PrecomputedWeights:
+    nn_index: np.ndarray  
+    A: np.ndarray         
+    w: np.ndarray       
+
+def precompute_weights(trainLocs: np.ndarray,
+                       M: int,
+                       range_param: float,
+                       smoothness: float,
+                       nugget: float) -> PrecomputedWeights:
+    """
+    Precompute per-station neighbor weights (a_i) and scalars (w_i) once.
+    """
+    trainLocs = np.asarray(trainLocs, dtype=np.float32)
+    N = trainLocs.shape[0]
+
+    M_eff = int(min(M, max(1, N - 1)))
+
+    tree = cKDTree(trainLocs)
+    dists, inds = tree.query(trainLocs, k=M_eff + 1)
+    nn_index = inds[:, 1:].astype(np.int64)   
+
+    A = np.empty((N, M_eff), dtype=np.float32)
+    w = np.empty((N,),       dtype=np.float32)
+
+    for i in range(N):
+        nbrs = nn_index[i]                         
+        idxs = np.concatenate(([i], nbrs))          
+        locs = trainLocs[idxs]
+        D = cdist(locs, locs)
+
+        K = matern.Matern(D, range_param, smoothness, phi=1.0).astype(np.float32)
+        R = (1.0 - nugget) * K + nugget * np.eye(M_eff + 1, dtype=np.float32)
+
+        chol = cholesky(R[1:, 1:], lower=False)     
+        t = np.linalg.solve(chol.T, R[0, 1:])
+        a = np.linalg.solve(chol, t).astype(np.float32)    
+
+        A[i, :] = a
+        w[i] = np.float32(1.0 - a @ R[1:, 0])
+
+    return PrecomputedWeights(nn_index=nn_index, A=A, w=w)
+
+def fast_transform_with_weights(trainData: pd.DataFrame,
+                                target: str,
+                                weights: PrecomputedWeights) -> pd.DataFrame:
+    """
+    Apply spatial transform with precomputed weights.
+    """
+    
+    y = trainData[target].to_numpy(dtype=np.float32)                
+    X = trainData.drop(columns=[target]).to_numpy(dtype=np.float32)  
+
+    N = X.shape[0]
+    M = weights.nn_index.shape[1]
+
+    X_out = np.empty_like(X, dtype=np.float32)
+    y_out = np.empty_like(y, dtype=np.float32)
+
+    for i in range(N):
+        a = weights.A[i]                       
+        nbrs = weights.nn_index[i]         
+        denom = np.sqrt(weights.w[i]).astype(np.float32)
+
+        y_out[i] = (y[i] - np.dot(a, y[nbrs])) / denom
+        X_out[i] = (X[i] - a @ X[nbrs]) / denom
+
+    cols = list(trainData.drop(columns=[target]).columns)
+    out = pd.DataFrame(np.column_stack([y_out, X_out]), columns=[target] + cols)
+
+    
+    return out
 
 def process_row(
-    idx: int, ytrain: pd.Series, Xtrain: pd.DataFrame, trainLocs: np.ndarray, nnList: list[list[int]], smoothness: float, range_param: float, nugget: float
+    idx: int, ytrain: pd.Series, Xtrain: pd.DataFrame, trainLocs: np.ndarray,
+    nnList: list[list[int]], smoothness: float, range_param: float, nugget: float
 ) -> dict[str, Any]:
     if idx == 0:
         y = ytrain.iloc[idx]
-        w = 1
+        w = 1.0
         X = Xtrain.iloc[idx] / np.sqrt(w)
     else:
-        locs = (
-            trainLocs[: idx + 1] if idx == 1 else trainLocs[np.append(idx, nnList[idx])]
-        )
+        locs = (trainLocs[: idx + 1] if idx == 1 else trainLocs[np.append(idx, nnList[idx])])
         D = cdist(locs, locs)
-
         covariance_matrix = matern.Matern(D, range_param, smoothness, phi=1.0)
         R = (1 - nugget) * covariance_matrix + (nugget * np.eye(D.shape[0]))
 
-        R_inv = np.linalg.inv(R[1:, 1:])
-        w = 1 - np.dot(R[0, 1:], np.dot(R_inv, R[1:, 0]))
-        X = (
-            Xtrain.iloc[idx].T - R[0, 1:].dot(R_inv.dot(Xtrain.iloc[nnList[idx]]))
-        ) / np.sqrt(w)
-        y = (
-            ytrain.iloc[idx] - R[0, 1:].dot(R_inv.dot(ytrain.iloc[nnList[idx]]))
-        ) / np.sqrt(w)
+        chol = cholesky(R[1:, 1:], lower=False)
+        t = np.linalg.solve(chol.T, R[0, 1:])
+        a = np.linalg.solve(chol, t)  # shape (M,)
+        w = 1.0 - a @ R[1:, 0]
+
+        X = (Xtrain.iloc[idx].to_numpy() - a @ Xtrain.iloc[nnList[idx]].to_numpy()) / np.sqrt(w)
+        y = (ytrain.iloc[idx] - a @ ytrain.iloc[nnList[idx]].to_numpy()) / np.sqrt(w)
 
     return {"y": y, "X": X, "w": w}
 
+# End of NEW CODE
 
 def process_test_data(
     idx: int, testLocs: np.ndarray, trainLocs: np.ndarray, Xtest: pd.DataFrame, Xtrain: pd.DataFrame, ytrain: pd.Series, nugget: float, range_param: float, smoothness: float, M: int

@@ -16,14 +16,44 @@ class SWEStationDataset(Dataset):
     def __init__(self, cfg):
         super(SWEStationDataset, self).__init__()
         self.cfg = cfg
+        self.dynamic_forcing_and_swe, self.snotel_attributes = preprocess(cfg)
+        
         self.beginning_of_snow_year = self.cfg.beginning_of_snow_year
         self.peak_swe_date = self.cfg.peak_swe_date
         self.beginning_year = self.cfg.beginning_year
         self.end_year = self.cfg.end_year
-        self.dynamic_forcing_and_swe, self.snotel_attributes = preprocess(self.cfg)
+        self.dynamic_forcing_and_swe, self.snotel_attributes = preprocess(cfg)
+        
+        self.dynamic_forcing_and_swe = self.dynamic_forcing_and_swe[
+            (self.dynamic_forcing_and_swe['Date'] >= f"{cfg.beginning_year}-{cfg.beginning_of_snow_year}") &
+            (self.dynamic_forcing_and_swe['Date'] <= f"{cfg.end_year}-12-31")
+        ]
+        
         self.dynamic_forcing_and_swe["Date"] = pd.to_datetime(self.dynamic_forcing_and_swe["Date"])
-        self.lookup_table = self._create_lookup_table()
-
+        self.lookup_table = []
+        years = pd.to_datetime(self.dynamic_forcing_and_swe["Date"]).dt.year.unique()
+        
+        for station in self.snotel_attributes["Station"]:
+            for year in years:
+                start_date = f"{year}-10-01"
+                peak_swe_date = f"{year+1}-{cfg.peak_swe_date}"
+                
+                station_data = self.dynamic_forcing_and_swe[
+                    (self.dynamic_forcing_and_swe["Station"] == station) & 
+                    (self.dynamic_forcing_and_swe["Date"] >= start_date) & 
+                    (self.dynamic_forcing_and_swe["Date"] <= peak_swe_date)
+                ]
+                
+                if len(station_data) > 0:
+                    self.lookup_table.append({
+                        "Station": station,
+                        "Year": year,
+                        "StartDate": pd.Timestamp(start_date),
+                        "PeakSWEDate": pd.Timestamp(peak_swe_date)
+                    })
+        
+        self.dynamic_forcing_and_swe.set_index(['Station', 'Date'], inplace=True)
+        
     def build_features(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(
             {
@@ -42,9 +72,6 @@ class SWEStationDataset(Dataset):
                 "TB_diff": df["TB_diff"],
             }
         )
-
-    #def prepare(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        #dynamic_forcing_and_swe, snotel_attributes = preprocess(self.cfg)
 
     def _create_lookup_table(self):
         lookup = []
@@ -78,15 +105,15 @@ class SWEStationDataset(Dataset):
             & (self.dynamic_forcing_and_swe["Date"] <= pd.Timestamp(peak_swe_date))
         )
 
-        data = self.dynamic_forcing_and_swe[mask].copy()
+        data = self.dynamic_forcing_and_swe[mask].copy()  
 
         if len(data) == 0:
             raise ValueError(f"No data found for station {station} between {start_date} and {peak_swe_date}")
 
         features = pd.DataFrame(
             {
-                "Station": data["Station"],
-                "Date": data["Date"],   
+                #"Station": data["Station"],
+                #"Date": data["Date"],   
                 "Elevation": data["Elevation_x"],
                 "Slope": data["Slope_tif1_x"],
                 "Aspect": data["Aspect_tif_x"],

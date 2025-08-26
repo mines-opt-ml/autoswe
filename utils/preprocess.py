@@ -11,8 +11,15 @@ def melt_dynamic(path: str, var_name: str) -> pd.DataFrame:
 
 
 def preprocess(cfg: object) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    start_date = f"{cfg.beginning_year}-01-01"
+    end_date = f"{cfg.end_year}-12-31"
+
     swe = pd.read_csv(cfg.swe_path)
     swe["Date"] = pd.to_datetime(swe["Date"]).dt.strftime("%Y-%m-%d")
+    swe = swe[
+        (pd.to_datetime(swe['Date']) >= start_date) &
+        (pd.to_datetime(swe['Date']) <= end_date)
+    ]
     swe_long = swe.melt(id_vars="Date", var_name="Station", value_name="SWE")
     swe_long["Station"] = swe_long["Station"].str.replace("_", " ").str.lower()
     
@@ -29,7 +36,15 @@ def preprocess(cfg: object) -> Tuple[pd.DataFrame, pd.DataFrame]:
         (cfg.tbdiff_path, "TB_diff"),
     ]
 
-    dynamic_dfs = [melt_dynamic(path, name) for path, name in dynamic_inputs]
+    dynamic_dfs = []
+    for path, name in dynamic_inputs:
+        df = melt_dynamic(path, name)
+        df = df[
+            (pd.to_datetime(df['Date']) >= start_date) &
+            (pd.to_datetime(df['Date']) <= end_date)
+        ]
+        dynamic_dfs.append(df)
+
     dynamic_merged = reduce(lambda left, right: pd.merge(left, right, on=["Date", "Station"]), dynamic_dfs)
 
     merged = pd.merge(swe_long, dynamic_merged, on=["Date", "Station"], how="inner")
@@ -37,7 +52,6 @@ def preprocess(cfg: object) -> Tuple[pd.DataFrame, pd.DataFrame]:
     dynamic_forcing_and_swe = merged.dropna()
     
     snotel_attributes = meta[["Station Name", "Elevation_x", "Slope_tif1_x", "Aspect_tif_x", "Latitude_x", "Longitude_x"]].copy()
-
     snotel_attributes = snotel_attributes.rename(columns={
         "Station Name": "Station",
         "Elevation_x": "Elevation",
