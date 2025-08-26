@@ -15,16 +15,16 @@ train_end_year: 2015
 val_start_year: 2016
 hidden_dims: [128, 64]
 hidden_size: 64
-num_layers: 2
-batch_size: 1000
-lr: 0.001
+num_layers: 10
+batch_size: 64
+lr: 0.1
 n_epochs: 10
 smoothness: 0.5
 range_param: 1.0
 nugget: 0.01
 M: 10
 ncores: 1
-device: cpu
+device: mps
 shuffle: true
 save: true
 save_path: results/model.pt
