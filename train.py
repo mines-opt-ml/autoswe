@@ -23,15 +23,16 @@ def train_model(cfg: SimpleNamespace) -> SWE_Net:
 
     pickle_file = "backtransform_info.pkl"
     
-    if os.path.exists(pickle_file):
-        os.remove(pickle_file)
-    
     if not os.path.exists(pickle_file):
+        print("Creating data cache...")
         dataloader = SWEDataLoader(cfg)
         train_loader, val_loader, _, bt_info = dataloader.prepare()
         pickle.dump((train_loader, val_loader, _, bt_info), open(pickle_file, "wb"))
+        print("Data cache created.")
     else:
+        print("Loading data from cache...")
         train_loader, val_loader, _, bt_info = pickle.load(open(pickle_file, "rb"))
+        print("Data cache loaded.")
 
     station_index = bt_info["station_index"]
     weights = bt_info["weights"]

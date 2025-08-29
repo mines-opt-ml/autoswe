@@ -52,6 +52,8 @@ model.eval()
 station_predictions = {}
 station_targets = {}
 
+print("Collecting predictions from validation data...")
+
 with torch.no_grad():
     for batch in val_loader:
         X = batch["dynamic forcing"].to(cfg.device)
@@ -72,6 +74,8 @@ with torch.no_grad():
 # Calculate NSE for each station
 station_nse = {}
 station_data = []
+
+print("Calculating NSE for each station...")
 
 for station in station_predictions.keys():
     if len(station_predictions[station]) > 10:  # Only calculate NSE if enough data points
@@ -149,5 +153,3 @@ print(top_stations.to_string(index=False))
 print("\nBottom 10 performing stations (lowest NSE):")
 bottom_stations = station_df.nsmallest(10, 'NSE')[['Station', 'NSE', 'State', 'Elevation']]
 print(bottom_stations.to_string(index=False))
-plt.grid(True)
-plt.tight_layout()

@@ -50,6 +50,8 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 cover/
+*.pkl
+results/*.csv
 
 # Translations
 *.mo
@@ -195,8 +197,3 @@ cython_debug/
 
 # Annoying Apple files
 .DS_Store
-
-# Project-specific files 
-*.pkl
-results/*.csv
-*.png
