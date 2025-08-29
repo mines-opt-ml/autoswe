@@ -1,4 +1,4 @@
-from typing import Dict, Tuple
+from typing import Dict
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
@@ -19,7 +19,7 @@ class SWEStationDataset(Dataset):
         self.dynamic_forcing_and_swe, self.snotel_attributes = preprocess(cfg)
         
         self.beginning_of_snow_year = self.cfg.beginning_of_snow_year
-        self.peak_swe_date = self.cfg.peak_swe_date
+        self.end_of_snow_year = self.cfg.end_of_snow_year
         self.beginning_year = self.cfg.beginning_year
         self.end_year = self.cfg.end_year
         self.dynamic_forcing_and_swe, self.snotel_attributes = preprocess(cfg)
@@ -35,13 +35,13 @@ class SWEStationDataset(Dataset):
         
         for station in self.snotel_attributes["Station"]:
             for year in years:
-                start_date = f"{year}-10-01"
-                peak_swe_date = f"{year+1}-{cfg.peak_swe_date}"
+                start_date = f"{year}-{cfg.beginning_of_snow_year}"
+                end_of_snow_year_date = f"{year+1}-{cfg.end_of_snow_year}"
                 
                 station_data = self.dynamic_forcing_and_swe[
                     (self.dynamic_forcing_and_swe["Station"] == station) & 
                     (self.dynamic_forcing_and_swe["Date"] >= start_date) & 
-                    (self.dynamic_forcing_and_swe["Date"] <= peak_swe_date)
+                    (self.dynamic_forcing_and_swe["Date"] <= end_of_snow_year_date)
                 ]
                 
                 if len(station_data) > 0:
@@ -49,8 +49,9 @@ class SWEStationDataset(Dataset):
                         "Station": station,
                         "Year": year,
                         "StartDate": pd.Timestamp(start_date),
-                        "PeakSWEDate": pd.Timestamp(peak_swe_date)
+                        "EndOfSnowYearDate": pd.Timestamp(end_of_snow_year_date)
                     })
+        
         
         self.dynamic_forcing_and_swe.set_index(['Station', 'Date'], inplace=True)
         
@@ -84,7 +85,7 @@ class SWEStationDataset(Dataset):
                         "Station": station,
                         "Year": year,
                         "StartDate": pd.to_datetime(f"{year}-{self.beginning_of_snow_year}"),
-                        "PeakSWEDate": pd.to_datetime(f"{year + 1}-{self.peak_swe_date}"),
+                        "EndOfSnowYearDate": pd.to_datetime(f"{year + 1}-{self.end_of_snow_year}"),
                     }
                 )
         return lookup
@@ -95,25 +96,23 @@ class SWEStationDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         station = self.lookup_table[idx]["Station"]
         start_date = self.lookup_table[idx]["StartDate"]
-        peak_swe_date = self.lookup_table[idx]["PeakSWEDate"]
+        end_of_snow_year_date = self.lookup_table[idx]["EndOfSnowYearDate"]
         year = self.lookup_table[idx]["Year"]
 
         sample = {}
         mask = (
             (self.dynamic_forcing_and_swe["Station"] == station)
             & (self.dynamic_forcing_and_swe["Date"] >= pd.Timestamp(start_date))
-            & (self.dynamic_forcing_and_swe["Date"] <= pd.Timestamp(peak_swe_date))
+            & (self.dynamic_forcing_and_swe["Date"] <= pd.Timestamp(end_of_snow_year_date))
         )
 
         data = self.dynamic_forcing_and_swe[mask].copy()  
 
         if len(data) == 0:
-            raise ValueError(f"No data found for station {station} between {start_date} and {peak_swe_date}")
+            raise ValueError(f"No data found for station {station} between {start_date} and {end_of_snow_year_date}")
 
         features = pd.DataFrame(
             {
-                #"Station": data["Station"],
-                #"Date": data["Date"],   
                 "Elevation": data["Elevation_x"],
                 "Slope": data["Slope_tif1_x"],
                 "Aspect": data["Aspect_tif_x"],
@@ -136,8 +135,8 @@ class SWEStationDataset(Dataset):
         station_mask = self.snotel_attributes["Station"] == station
         attrs = self.snotel_attributes.loc[station_mask, ["Elevation", "Slope", "Aspect"]].values
         sample["snotel attributes"] = torch.tensor(attrs, dtype=torch.float32)
-        sample["year"] = year  # NB: This is not a torch.tensor, so can't be sent to GPU
-        sample["station"] = station  # NB: This is not a torch.tensor, so can't be sent to GPU
+        sample["year"] = year
+        sample["station"] = station
 
         return sample
 

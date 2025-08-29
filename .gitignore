@@ -194,4 +194,5 @@ cython_debug/
 .cursorindexingignore
 
 # Annoying Apple files
-.DS_Store
+.DS_Store*.pkl
+results/*.csv

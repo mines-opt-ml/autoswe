@@ -1,0 +1,12 @@
+geopandas==1.1.1
+geoplot==0.5.1
+joblib==1.5.2
+matplotlib==3.10.5
+numpy==2.2.6
+omegaconf==2.3.0
+pandas==2.3.2
+pytest==8.4.1
+PyYAML==6.0.2
+scikit_learn==1.7.1
+scipy==1.14.1
+torch==2.8.0

@@ -8,23 +8,28 @@ tb19_path: data/TB_19_VE_CONUS.csv
 tb37_path: data/TB_37_VE_CONUS.csv
 tbdiff_path: data/TB_diff_37_19_VE_CONUS.csv
 beginning_of_snow_year: "10-01"
-peak_swe_date: "04-01"
-beginning_year: 2011
-end_year: 2017
-train_end_year: 2015
-val_start_year: 2016
+end_of_snow_year: "05-31"
+beginning_year: 2001
+end_year: 2018
+train_end_year: 2013
+val_start_year: 2014
 hidden_dims: [128, 64]
-hidden_size: 64
-num_layers: 10
-batch_size: 64
-lr: 0.1
-n_epochs: 10
-smoothness: 0.5
-range_param: 1.0
-nugget: 0.01
-M: 10
-ncores: 1
-device: mps
+hidden_size: 256
+num_layers: 4
+batch_size: 512
+lr: 0.01
+n_epochs: 5
+smoothness: 1.0
+range_param: 2.0
+nugget: 0.1
+M: 15
+ncores: 4
+device: cuda:0
 shuffle: true
 save: true
 save_path: results/model.pt
+loss_function: "nse"  #Options: "mse", "smoothl1", "nse"
+#The below are station weighting parameters (used for non-NSE losses)
+min_station_weight: 0.1  
+swe_weight_threshold: 2.0  
+weight_steepness: 2.0  
