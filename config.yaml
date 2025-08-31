@@ -9,10 +9,10 @@ tb37_path: data/TB_37_VE_CONUS.csv
 tbdiff_path: data/TB_diff_37_19_VE_CONUS.csv
 beginning_of_snow_year: "10-01"
 end_of_snow_year: "05-31"
-beginning_year: 2001
+beginning_year: 2010
 end_year: 2018
-train_end_year: 2013
-val_start_year: 2014
+train_end_year: 2015
+val_start_year: 2016
 hidden_dims: [128, 64]
 hidden_size: 256
 num_layers: 4
@@ -28,8 +28,5 @@ device: cuda:0
 shuffle: true
 save: true
 save_path: results/model.pt
-loss_function: "nse"  #Options: "mse", "smoothl1", "nse"
-#The below are station weighting parameters (used for non-NSE losses)
-min_station_weight: 0.1  
-swe_weight_threshold: 2.0  
-weight_steepness: 2.0  
+loss: [MSE, NSE] #options: MSE, NSE, or [MSE, NSE]
+loss_weights: [0.7, 0.3] #if [MSE, NSE], insert desired [MSEweight, NSEweight] here

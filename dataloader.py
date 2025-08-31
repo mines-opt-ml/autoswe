@@ -1,4 +1,5 @@
 from typing import Tuple, Dict, List
+import os 
 import torch
 from torch.utils.data import DataLoader, Subset
 from torch.nn.utils.rnn import pad_sequence
@@ -6,12 +7,17 @@ from dataset import SWEStationDataset
 from utils.SpatialTransform import SpatialTransformer, precompute_weights, fast_transform_with_weights
 import numpy as np
 import pandas as pd
+import pickle
+import argparse
+import glob
 
 class SWEDataLoader:
     def __init__(self, cfg):
         self.cfg = cfg
         self.train_years = range(cfg.beginning_year, cfg.train_end_year + 1)
         self.val_years = range(cfg.val_start_year, cfg.end_year + 1)
+        self.cache_file = f"decorrelated_dataset_{cfg.M}_{cfg.range_param}_{cfg.smoothness}_{cfg.nugget}.pkl"
+
 
     def prepare(self) -> Tuple[DataLoader, DataLoader, SpatialTransformer, dict]:
         """
@@ -81,60 +87,74 @@ class SWEDataLoader:
             if entry["Year"] in self.val_years
         ]
         
-        station_order = dataset.snotel_attributes["Station"].values
-        station_index = {s: i for i, s in enumerate(station_order)}
-        locs_all = dataset.snotel_attributes[["Latitude", "Longitude"]].values
+        if os.path.exists(self.cache_file):
+            print(f"Loading cached decorrelated dataset: {self.cache_file}")
+            with open(self.cache_file, "rb") as f:
+                dataset, station_index, weights, backtrans_cache = pickle.load(f)
+        else:
+            print("Computing spatial decorrelation (this may take a while)...")
 
-        weights = precompute_weights(
-            trainLocs=locs_all,
-            M=self.cfg.M,
-            range_param=self.cfg.range_param,
-            smoothness=self.cfg.smoothness,
-            nugget=self.cfg.nugget,
-        )
+            station_order = dataset.snotel_attributes["Station"].values
+            station_index = {s: i for i, s in enumerate(station_order)}
+            locs_all = dataset.snotel_attributes[["Latitude", "Longitude"]].values
 
-        backtrans_cache = {} 
-
-        unique_dates = sorted(dataset.dynamic_forcing_and_swe["Date"].unique())
-        for dt in unique_dates:
-            swe_dt = (
-                pd.DataFrame({"Station": station_order})
-                .merge(orig_swe[orig_swe["Date"] == dt][["Station", "SWE"]], on="Station", how="left")
-            )
-            if swe_dt["SWE"].isna().any():
-                swe_dt = swe_dt.copy()
-                swe_dt["SWE"] = swe_dt["SWE"].fillna(swe_dt["SWE"].mean())
-
-            y_vec = swe_dt["SWE"].to_numpy(dtype=np.float32)
-
-            offsets = np.empty(len(station_order), dtype=np.float32)
-            for i, nbrs in enumerate(weights.nn_index):
-                offsets[i] = np.dot(weights.A[i], y_vec[nbrs])
-            backtrans_cache[pd.Timestamp(dt).strftime("%Y-%m-%d")] = offsets
-
-            time_mask = dataset.dynamic_forcing_and_swe["Date"] == dt
-            df_dt = dataset.dynamic_forcing_and_swe[time_mask].copy()
-            df_num = df_dt.select_dtypes(include=[np.number]).copy()
-            
-            aligned = pd.DataFrame({"Station": station_order})
-            aligned = aligned.merge(df_dt[["Station"]], on="Station", how="left")
-            
-            numeric_data = df_num.join(df_dt["Station"]).drop(columns=[])
-            aligned = aligned.merge(numeric_data, on="Station", how="left")
-            
-            numeric_cols = df_num.columns
-            for col in numeric_cols:
-                if aligned[col].isna().any():
-                    aligned[col] = aligned[col].fillna(aligned[col].mean())
-
-            data_for_transform = aligned.drop(columns=["Station"])
-            transformed = fast_transform_with_weights(
-                trainData=data_for_transform, target="SWE", weights=weights
+            # Precompute weights once
+            weights = precompute_weights(
+                trainLocs=locs_all,
+                M=self.cfg.M,
+                range_param=self.cfg.range_param,
+                smoothness=self.cfg.smoothness,
+                nugget=self.cfg.nugget,
             )
 
-            swe_trans = pd.DataFrame({"Station": station_order, "SWE": transformed["SWE"].values})
-            rewritten = df_dt[["Station"]].merge(swe_trans, on="Station", how="left")["SWE"].values
-            dataset.dynamic_forcing_and_swe.loc[time_mask, "SWE"] = rewritten
+            backtrans_cache = {}
+            unique_dates = sorted(dataset.dynamic_forcing_and_swe["Date"].unique())
+
+            for dt in unique_dates:
+                swe_dt = (
+                    pd.DataFrame({"Station": station_order})
+                    .merge(orig_swe[orig_swe["Date"] == dt][["Station", "SWE"]], on="Station", how="left")
+                )
+                if swe_dt["SWE"].isna().any():
+                    swe_dt["SWE"] = swe_dt["SWE"].fillna(swe_dt["SWE"].mean())
+
+                y_vec = swe_dt["SWE"].to_numpy(dtype=np.float32)
+
+                # back-transform offsets
+                offsets = np.empty(len(station_order), dtype=np.float32)
+                for i, nbrs in enumerate(weights.nn_index):
+                    offsets[i] = np.dot(weights.A[i], y_vec[nbrs])
+                backtrans_cache[pd.Timestamp(dt).strftime("%Y-%m-%d")] = offsets
+
+                # apply decorrelation once
+                time_mask = dataset.dynamic_forcing_and_swe["Date"] == dt
+                df_dt = dataset.dynamic_forcing_and_swe[time_mask].copy()
+                df_num = df_dt.select_dtypes(include=[np.number]).copy()
+
+                aligned = pd.DataFrame({"Station": station_order}).merge(df_dt, on="Station", how="left")
+
+                numeric_cols = aligned.select_dtypes(include=[np.number]).columns.tolist()
+
+                for col in numeric_cols:
+                    if aligned[col].isna().any():
+                        aligned[col] = aligned[col].fillna(aligned[col].mean())
+
+                data_for_transform = aligned[numeric_cols].copy()
+
+                transformed = fast_transform_with_weights(
+                    trainData=data_for_transform, target="SWE", weights=weights
+)
+
+                swe_trans = pd.DataFrame({"Station": station_order, "SWE": transformed["SWE"].values})
+                dataset.dynamic_forcing_and_swe.loc[time_mask, "SWE"] = df_dt[["Station"]].merge(
+                    swe_trans, on="Station", how="left"
+                )["SWE"].values
+
+            # Save once to cache
+            tmp_file = self.cache_file + ".tmp"
+            with open(tmp_file, "wb") as f:
+                pickle.dump((dataset, station_index, weights, backtrans_cache), f)
+            os.replace(tmp_file, self.cache_file)  # atomic move
 
         train_dataset = Subset(dataset, train_indices)
         val_dataset = Subset(dataset, val_indices)
