@@ -3,47 +3,120 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 from utils.preprocess import preprocess
+from utils.normalizer import Normalizer
 
 
 class SWEStationDataset(Dataset):
     """
-    The dataset class should handle loading the csv files and processing the data.
-    Each item in the dataset should be (X: torch.Tensor[num_features, window_length], y: torch.Tensor[, window_length])
-    where X is the features and y is the target SWE value.
-    Windoow_length is the length of a snow year.
+    Dataset class for SWE prediction.
+    Each item = (X: torch.Tensor[num_features, window_length], 
+                 y: torch.Tensor[window_length])
+    Window_length = length of a snow year.
     """
 
     def __init__(self, cfg):
         super(SWEStationDataset, self).__init__()
         self.cfg = cfg
-        self.dynamic_forcing_and_swe, self.snotel_attributes = preprocess(cfg)
-        
+
         self.beginning_of_snow_year = self.cfg.beginning_of_snow_year
         self.end_of_snow_year = self.cfg.end_of_snow_year
         self.beginning_year = self.cfg.beginning_year
         self.end_year = self.cfg.end_year
         self.dynamic_forcing_and_swe, self.snotel_attributes = preprocess(cfg)
-        
+
+        # Ensure numeric columns are floats
+        self.dynamic_forcing_and_swe = self.dynamic_forcing_and_swe.apply(
+            lambda col: col.astype(float) if col.dtype in ["int64", "int32"] else col
+        )
+
+        self.obs_swe = self.dynamic_forcing_and_swe[["Station", "Date", "SWE"]].copy()
+
+        # Training mask (for fitting normalizers)
+        train_mask = pd.to_datetime(self.dynamic_forcing_and_swe["Date"]).dt.year <= cfg.train_end_year
+
+        # ---------------------------
+        # Per-station normalizers
+        # ---------------------------
+        self.station_normalizers = {}
+        self.swe_normalizers = {}
+        method = getattr(cfg, "normalization", "zscore")
+
+        # Iterate over stations
+        for station in self.dynamic_forcing_and_swe["Station"].unique():
+            station_mask = (self.dynamic_forcing_and_swe["Station"] == station) & train_mask
+
+            # Inputs (dynamic forcings only, SWE excluded)
+            train_inputs = (
+                self.dynamic_forcing_and_swe.loc[station_mask]
+                .drop(columns=["SWE"])
+                .select_dtypes(include=[float, int])
+            )
+            input_norm = Normalizer(method=method)
+            if len(train_inputs) > 0:
+                input_norm.fit(train_inputs)
+            self.station_normalizers[station] = input_norm
+
+            # SWE targets
+            train_targets = self.dynamic_forcing_and_swe.loc[station_mask, ["SWE"]]
+            swe_norm = Normalizer(method=method)
+            if len(train_targets) > 0:
+                swe_norm.fit(train_targets)
+            self.swe_normalizers[station] = swe_norm
+
+        # Apply normalization: inputs
+        inputs_normed = []
+        for station, norm in self.station_normalizers.items():
+            station_mask = self.dynamic_forcing_and_swe["Station"] == station
+            inputs = (
+                self.dynamic_forcing_and_swe.loc[station_mask]
+                .drop(columns=["SWE"])
+                .select_dtypes(include=[float, int])
+                .astype(float)
+            )
+            normed = norm.transform(inputs)
+            normed["Station"] = station
+            normed["Date"] = self.dynamic_forcing_and_swe.loc[station_mask, "Date"].values
+            inputs_normed.append(normed)
+
+        inputs_normed_df = pd.concat(inputs_normed, axis=0)
+        self.dynamic_forcing_and_swe.update(inputs_normed_df)
+
+        # Apply normalization: SWE
+        swe_normed = []
+        for station, norm in self.swe_normalizers.items():
+            station_mask = self.dynamic_forcing_and_swe["Station"] == station
+            swe = self.dynamic_forcing_and_swe.loc[station_mask, ["SWE"]].astype(float)
+            normed = norm.transform(swe)
+            normed["Station"] = station
+            normed["Date"] = self.dynamic_forcing_and_swe.loc[station_mask, "Date"].values
+            swe_normed.append(normed)
+
+        swe_normed_df = pd.concat(swe_normed, axis=0)
+        self.dynamic_forcing_and_swe.update(swe_normed_df)
+
+        # Restrict by snow-year range
         self.dynamic_forcing_and_swe = self.dynamic_forcing_and_swe[
-            (self.dynamic_forcing_and_swe['Date'] >= f"{cfg.beginning_year}-{cfg.beginning_of_snow_year}") &
-            (self.dynamic_forcing_and_swe['Date'] <= f"{cfg.end_year}-12-31")
+            (self.dynamic_forcing_and_swe['Date'] >= f"{cfg.beginning_year}-{cfg.beginning_of_snow_year}")
+            & (self.dynamic_forcing_and_swe['Date'] <= f"{cfg.end_year}-12-31")
         ]
-        
+
+        # Keep raw SWE for backtransform references
+        #self.raw_swe = self.dynamic_forcing_and_swe[["Station", "Date", "SWE"]].copy()
+
+        # Build lookup table
         self.dynamic_forcing_and_swe["Date"] = pd.to_datetime(self.dynamic_forcing_and_swe["Date"])
         self.lookup_table = []
         years = pd.to_datetime(self.dynamic_forcing_and_swe["Date"]).dt.year.unique()
-        
+
         for station in self.snotel_attributes["Station"]:
             for year in years:
                 start_date = f"{year}-{cfg.beginning_of_snow_year}"
                 end_of_snow_year_date = f"{year+1}-{cfg.end_of_snow_year}"
-                
                 station_data = self.dynamic_forcing_and_swe[
-                    (self.dynamic_forcing_and_swe["Station"] == station) & 
-                    (self.dynamic_forcing_and_swe["Date"] >= start_date) & 
-                    (self.dynamic_forcing_and_swe["Date"] <= end_of_snow_year_date)
+                    (self.dynamic_forcing_and_swe["Station"] == station)
+                    & (self.dynamic_forcing_and_swe["Date"] >= start_date)
+                    & (self.dynamic_forcing_and_swe["Date"] <= end_of_snow_year_date)
                 ]
-                
                 if len(station_data) > 0:
                     self.lookup_table.append({
                         "Station": station,
@@ -51,11 +124,11 @@ class SWEStationDataset(Dataset):
                         "StartDate": pd.Timestamp(start_date),
                         "EndOfSnowYearDate": pd.Timestamp(end_of_snow_year_date)
                     })
-        
-        
+
         self.dynamic_forcing_and_swe.set_index(['Station', 'Date'], inplace=True)
-        
+
     def build_features(df: pd.DataFrame) -> pd.DataFrame:
+        """Construct feature DataFrame from raw data."""
         return pd.DataFrame(
             {
                 "Elevation": df["Elevation_x"],
@@ -77,7 +150,6 @@ class SWEStationDataset(Dataset):
     def _create_lookup_table(self):
         lookup = []
         stations = self.dynamic_forcing_and_swe["Station"].drop_duplicates().values
-
         for year in range(self.beginning_year, self.end_year - 1):
             for station in stations:
                 lookup.append(
@@ -99,15 +171,13 @@ class SWEStationDataset(Dataset):
         end_of_snow_year_date = self.lookup_table[idx]["EndOfSnowYearDate"]
         year = self.lookup_table[idx]["Year"]
 
-        sample = {}
         mask = (
             (self.dynamic_forcing_and_swe["Station"] == station)
             & (self.dynamic_forcing_and_swe["Date"] >= pd.Timestamp(start_date))
             & (self.dynamic_forcing_and_swe["Date"] <= pd.Timestamp(end_of_snow_year_date))
         )
 
-        data = self.dynamic_forcing_and_swe[mask].copy()  
-
+        data = self.dynamic_forcing_and_swe[mask].copy()
         if len(data) == 0:
             raise ValueError(f"No data found for station {station} between {start_date} and {end_of_snow_year_date}")
 
@@ -129,30 +199,23 @@ class SWEStationDataset(Dataset):
             }
         )
 
-        sample["dynamic forcing"] = torch.tensor(features.values, dtype=torch.float32)
-        sample["swe"] = torch.tensor(data["SWE"].values, dtype=torch.float32)
-        sample["dates"] = data["Date"].dt.strftime("%Y-%m-%d").values
-        station_mask = self.snotel_attributes["Station"] == station
-        attrs = self.snotel_attributes.loc[station_mask, ["Elevation", "Slope", "Aspect"]].values
-        sample["snotel attributes"] = torch.tensor(attrs, dtype=torch.float32)
-        sample["year"] = year
-        sample["station"] = station
+        sample = {
+            "dynamic forcing": torch.tensor(features.values, dtype=torch.float32),
+            "swe": torch.tensor(data["SWE"].values, dtype=torch.float32),  # SWE is already normalized
+            "dates": data["Date"].dt.strftime("%Y-%m-%d").values,
+            "snotel attributes": torch.tensor(
+                self.snotel_attributes.loc[self.snotel_attributes["Station"] == station, ["Elevation", "Slope", "Aspect"]].values,
+                dtype=torch.float32
+            ),
+            "year": year,
+            "station": station,
+        }
 
         return sample
 
     def get(self, station: str, year: int) -> Dict[str, torch.Tensor]:
-        """
-        Get data for a specific station and year.
-
-        Args:
-            station: Station identifier
-            year: Year to retrieve data for
-
-        Returns:
-            Dictionary containing dynamic forcing, SWE, and station attributes
-        """
+        """Get data for a specific station and year."""
         for idx, entry in enumerate(self.lookup_table):
             if entry["Station"] == station and entry["Year"] == year:
                 return self.__getitem__(idx)
-
         raise ValueError(f"No data found for station {station} and year {year}")

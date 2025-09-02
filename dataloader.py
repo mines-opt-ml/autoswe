@@ -8,8 +8,7 @@ from utils.SpatialTransform import SpatialTransformer, precompute_weights, fast_
 import numpy as np
 import pandas as pd
 import pickle
-import argparse
-import glob
+
 
 class SWEDataLoader:
     def __init__(self, cfg):

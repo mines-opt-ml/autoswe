@@ -9,24 +9,25 @@ tb37_path: data/TB_37_VE_CONUS.csv
 tbdiff_path: data/TB_diff_37_19_VE_CONUS.csv
 beginning_of_snow_year: "10-01"
 end_of_snow_year: "05-31"
-beginning_year: 2010
-end_year: 2018
-train_end_year: 2015
-val_start_year: 2016
+beginning_year: 2001
+end_year: 2019
+train_end_year: 2014
+val_start_year: 2015
 hidden_dims: [128, 64]
 hidden_size: 256
 num_layers: 4
-batch_size: 512
-lr: 0.01
-n_epochs: 10
+batch_size: 256
+lr: 0.001
+n_epochs: 100
 smoothness: 1.0
 range_param: 2.0
 nugget: 0.1
-M: 15
+M: 20
 ncores: 4
 device: cuda:0
 shuffle: true
 save: true
 save_path: results/model.pt
 loss: [MSE, NSE] #options: MSE, NSE, or [MSE, NSE]
-loss_weights: [0.7, 0.3] #if [MSE, NSE], insert desired [MSEweight, NSEweight] here
+loss_weights: [0.8, 0.2] #if [MSE, NSE], insert desired [MSEweight, NSEweight] here
+normalization: "zscore"   #options: zscore, minmax
