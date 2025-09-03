@@ -13,10 +13,10 @@ import pickle
 class SWEDataLoader:
     def __init__(self, cfg):
         self.cfg = cfg
-        self.train_years = range(cfg.beginning_year, cfg.train_end_year + 1)
-        self.val_years = range(cfg.val_start_year, cfg.end_year + 1)
+        self.train_years = range(cfg.train_start_year, cfg.train_end_year + 1)
+        self.val_years = range(cfg.val_start_year, cfg.val_end_year + 1)
+        self.test_years = range(cfg.test_start_year, cfg.test_end_year + 1)
         self.cache_file = f"decorrelated_dataset_{cfg.M}_{cfg.range_param}_{cfg.smoothness}_{cfg.nugget}.pkl"
-
 
     def prepare(self) -> Tuple[DataLoader, DataLoader, SpatialTransformer, dict]:
         """
@@ -85,6 +85,10 @@ class SWEDataLoader:
             idx for idx, entry in enumerate(dataset.lookup_table)
             if entry["Year"] in self.val_years
         ]
+        test_indices = [
+            idx for idx, entry in enumerate(dataset.lookup_table)
+            if entry["Year"] in self.test_years
+        ]
         
         if os.path.exists(self.cache_file):
             print(f"Loading cached decorrelated dataset: {self.cache_file}")
@@ -109,7 +113,10 @@ class SWEDataLoader:
             backtrans_cache = {}
             unique_dates = sorted(dataset.dynamic_forcing_and_swe["Date"].unique())
 
-            for dt in unique_dates:
+            # 🚨 Restrict decorrelation cache to TRAINING years only
+            train_dates = [d for d in unique_dates if pd.Timestamp(d).year <= self.cfg.train_end_year]
+
+            for dt in train_dates:
                 swe_dt = (
                     pd.DataFrame({"Station": station_order})
                     .merge(orig_swe[orig_swe["Date"] == dt][["Station", "SWE"]], on="Station", how="left")
@@ -119,35 +126,72 @@ class SWEDataLoader:
 
                 y_vec = swe_dt["SWE"].to_numpy(dtype=np.float32)
 
-                # back-transform offsets
+                # back-transform offsets (for SWE only)
                 offsets = np.empty(len(station_order), dtype=np.float32)
                 for i, nbrs in enumerate(weights.nn_index):
                     offsets[i] = np.dot(weights.A[i], y_vec[nbrs])
                 backtrans_cache[pd.Timestamp(dt).strftime("%Y-%m-%d")] = offsets
 
-                # apply decorrelation once
+                # apply decorrelation (training data only)
                 time_mask = dataset.dynamic_forcing_and_swe["Date"] == dt
                 df_dt = dataset.dynamic_forcing_and_swe[time_mask].copy()
-                df_num = df_dt.select_dtypes(include=[np.number]).copy()
-
                 aligned = pd.DataFrame({"Station": station_order}).merge(df_dt, on="Station", how="left")
 
                 numeric_cols = aligned.select_dtypes(include=[np.number]).columns.tolist()
-
                 for col in numeric_cols:
                     if aligned[col].isna().any():
                         aligned[col] = aligned[col].fillna(aligned[col].mean())
 
-                data_for_transform = aligned[numeric_cols].copy()
+                data_for_transform = aligned.copy()
+
+                cols_to_decor = ["SWE", "Tmax", "Tmin", "Precip", "Tobs", "TB_19", "TB_37", "TB_diff"]
 
                 transformed = fast_transform_with_weights(
-                    trainData=data_for_transform, target="SWE", weights=weights
-)
+                    trainData=data_for_transform,
+                    target="SWE",
+                    weights=weights,
+                    cols_to_transform=cols_to_decor,
+                    static_cols=None,
+                    station_col="Station"
+                )
 
-                swe_trans = pd.DataFrame({"Station": station_order, "SWE": transformed["SWE"].values})
-                dataset.dynamic_forcing_and_swe.loc[time_mask, "SWE"] = df_dt[["Station"]].merge(
-                    swe_trans, on="Station", how="left"
-                )["SWE"].values
+                # Write back decorrelated SWE + forcings
+                dataset.dynamic_forcing_and_swe.loc[time_mask, "SWE"] = transformed["SWE"].values
+                for col in [c for c in cols_to_decor if c != "SWE"]:
+                    dataset.dynamic_forcing_and_swe.loc[time_mask, col] = transformed[col].values
+
+            # ----------------------------------------------------
+            # Apply decorrelation to VALIDATION years on the fly
+            # ----------------------------------------------------
+            val_dates = [d for d in unique_dates if pd.Timestamp(d).year >= self.cfg.val_start_year]
+
+            for dt in val_dates:
+                time_mask = dataset.dynamic_forcing_and_swe["Date"] == dt
+                df_dt = dataset.dynamic_forcing_and_swe[time_mask].copy()
+                aligned = pd.DataFrame({"Station": station_order}).merge(df_dt, on="Station", how="left")
+
+                numeric_cols = aligned.select_dtypes(include=[np.number]).columns.tolist()
+                for col in numeric_cols:
+                    if aligned[col].isna().any():
+                        aligned[col] = aligned[col].fillna(aligned[col].mean())
+
+                data_for_transform = aligned.copy()
+
+                cols_to_decor = ["SWE", "Tmax", "Tmin", "Precip", "Tobs", "TB_19", "TB_37", "TB_diff"]
+
+                transformed = fast_transform_with_weights(
+                    trainData=data_for_transform,
+                    target="SWE",
+                    weights=weights,
+                    cols_to_transform=cols_to_decor,
+                    static_cols=None,
+                    station_col="Station"
+                )
+
+                # Write back decorrelated SWE + forcings for validation dates
+                dataset.dynamic_forcing_and_swe.loc[time_mask, "SWE"] = transformed["SWE"].values
+                for col in [c for c in cols_to_decor if c != "SWE"]:
+                    dataset.dynamic_forcing_and_swe.loc[time_mask, col] = transformed[col].values
 
             # Save once to cache
             tmp_file = self.cache_file + ".tmp"
@@ -157,6 +201,8 @@ class SWEDataLoader:
 
         train_dataset = Subset(dataset, train_indices)
         val_dataset = Subset(dataset, val_indices)
+        test_dataset = Subset(dataset, test_indices)
+
 
         train_loader = DataLoader(
             train_dataset, 
@@ -171,13 +217,19 @@ class SWEDataLoader:
             collate_fn=self.collate_fn
         )
 
+        test_loader = DataLoader(
+            test_dataset, 
+            batch_size=self.cfg.batch_size,
+            collate_fn=self.collate_fn
+)
+
         bt_info = {
             "weights": weights,
             "station_index": station_index,
             "backtrans_cache": backtrans_cache
         }
         
-        return train_loader, val_loader, SpatialTransformer(), bt_info
+        return train_loader, val_loader, test_loader, SpatialTransformer(), bt_info
 
     @staticmethod
     def collate_fn(batch: List[Dict]) -> Dict[str, torch.Tensor]:

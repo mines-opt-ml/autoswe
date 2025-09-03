@@ -20,8 +20,13 @@ class SWEStationDataset(Dataset):
 
         self.beginning_of_snow_year = self.cfg.beginning_of_snow_year
         self.end_of_snow_year = self.cfg.end_of_snow_year
-        self.beginning_year = self.cfg.beginning_year
-        self.end_year = self.cfg.end_year
+        # Global span that covers train/val/test
+        self.global_start_year = min(
+            self.cfg.train_start_year, self.cfg.val_start_year, self.cfg.test_start_year
+        )
+        self.global_end_year = max(
+            self.cfg.train_end_year, self.cfg.val_end_year, self.cfg.test_end_year
+        )
         self.dynamic_forcing_and_swe, self.snotel_attributes = preprocess(cfg)
 
         # Ensure numeric columns are floats
@@ -32,7 +37,8 @@ class SWEStationDataset(Dataset):
         self.obs_swe = self.dynamic_forcing_and_swe[["Station", "Date", "SWE"]].copy()
 
         # Training mask (for fitting normalizers)
-        train_mask = pd.to_datetime(self.dynamic_forcing_and_swe["Date"]).dt.year <= cfg.train_end_year
+        years = pd.to_datetime(self.dynamic_forcing_and_swe["Date"]).dt.year
+        train_mask = (years >= cfg.train_start_year) & (years <= cfg.train_end_year)
 
         # ---------------------------
         # Per-station normalizers
@@ -94,38 +100,49 @@ class SWEStationDataset(Dataset):
         swe_normed_df = pd.concat(swe_normed, axis=0)
         self.dynamic_forcing_and_swe.update(swe_normed_df)
 
-        # Restrict by snow-year range
+        # Restrict by snow-year range (use proper datetimes)
+        start = pd.to_datetime(f"{self.global_start_year}-{self.beginning_of_snow_year}")
+        end = pd.to_datetime(f"{self.global_end_year}-12-31")
         self.dynamic_forcing_and_swe = self.dynamic_forcing_and_swe[
-            (self.dynamic_forcing_and_swe['Date'] >= f"{cfg.beginning_year}-{cfg.beginning_of_snow_year}")
-            & (self.dynamic_forcing_and_swe['Date'] <= f"{cfg.end_year}-12-31")
-        ]
+            (self.dynamic_forcing_and_swe["Date"] >= start) &
+            (self.dynamic_forcing_and_swe["Date"] <= end)
+        ].copy()
 
-        # Keep raw SWE for backtransform references
-        #self.raw_swe = self.dynamic_forcing_and_swe[["Station", "Date", "SWE"]].copy()
+        # Restrict metadata to valid stations
+        valid_stations = self.dynamic_forcing_and_swe["Station"].unique()
+        self.snotel_attributes = self.snotel_attributes[
+            self.snotel_attributes["Station"].isin(valid_stations)
+        ].copy()
 
         # Build lookup table
         self.dynamic_forcing_and_swe["Date"] = pd.to_datetime(self.dynamic_forcing_and_swe["Date"])
         self.lookup_table = []
-        years = pd.to_datetime(self.dynamic_forcing_and_swe["Date"]).dt.year.unique()
 
-        for station in self.snotel_attributes["Station"]:
+        years = range(self.global_start_year, self.global_end_year + 1)
+        for station in valid_stations:
             for year in years:
-                start_date = f"{year}-{cfg.beginning_of_snow_year}"
-                end_of_snow_year_date = f"{year+1}-{cfg.end_of_snow_year}"
-                station_data = self.dynamic_forcing_and_swe[
-                    (self.dynamic_forcing_and_swe["Station"] == station)
-                    & (self.dynamic_forcing_and_swe["Date"] >= start_date)
-                    & (self.dynamic_forcing_and_swe["Date"] <= end_of_snow_year_date)
-                ]
-                if len(station_data) > 0:
-                    self.lookup_table.append({
-                        "Station": station,
-                        "Year": year,
-                        "StartDate": pd.Timestamp(start_date),
-                        "EndOfSnowYearDate": pd.Timestamp(end_of_snow_year_date)
-                    })
+                start_date = pd.to_datetime(f"{year}-{self.beginning_of_snow_year}")
+                end_of_snow_year_date = pd.to_datetime(f"{year + 1}-{self.end_of_snow_year}")
 
-        self.dynamic_forcing_and_swe.set_index(['Station', 'Date'], inplace=True)
+                window_data = self.dynamic_forcing_and_swe[
+                    (self.dynamic_forcing_and_swe["Station"] == station) &
+                    (self.dynamic_forcing_and_swe["Date"] >= start_date) &
+                    (self.dynamic_forcing_and_swe["Date"] <= end_of_snow_year_date)
+                ]
+
+                if window_data.empty:
+                    raise RuntimeError(
+                        f"No data found for station {station} in water year {year} "
+                        f"(expected {start_date.date()} to {end_of_snow_year_date.date()}). "
+                        f"Check date types and snow-year slicing."
+                    )
+
+                self.lookup_table.append({
+                    "Station": station,
+                    "Year": year,
+                    "StartDate": pd.Timestamp(start_date),
+                    "EndOfSnowYearDate": pd.Timestamp(end_of_snow_year_date),
+                })
 
     def build_features(df: pd.DataFrame) -> pd.DataFrame:
         """Construct feature DataFrame from raw data."""
@@ -150,7 +167,7 @@ class SWEStationDataset(Dataset):
     def _create_lookup_table(self):
         lookup = []
         stations = self.dynamic_forcing_and_swe["Station"].drop_duplicates().values
-        for year in range(self.beginning_year, self.end_year - 1):
+        for year in range(self.global_start_year, self.global_end_year - 1):
             for station in stations:
                 lookup.append(
                     {

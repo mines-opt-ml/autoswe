@@ -4,18 +4,18 @@ import pandas as pd
 
 def melt_dynamic(path: str, var_name: str) -> pd.DataFrame:
     df = pd.read_csv(path)
-    df["Date"] = pd.to_datetime(df["Date"]).dt.strftime("%Y-%m-%d")
+    df["Date"] = pd.to_datetime(df["Date"])
     df_long = df.melt(id_vars="Date", var_name="Station", value_name=var_name)
     df_long["Station"] = df_long["Station"].str.replace("_", " ").str.lower()
     return df_long
 
 
 def preprocess(cfg: object) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    start_date = f"{cfg.beginning_year}-01-01"
-    end_date = f"{cfg.end_year}-12-31"
+    start_date = f"{cfg.train_start_year}-01-01"
+    end_date = f"{cfg.test_end_year}-12-31"
 
     swe = pd.read_csv(cfg.swe_path)
-    swe["Date"] = pd.to_datetime(swe["Date"]).dt.strftime("%Y-%m-%d")
+    swe["Date"] = pd.to_datetime(swe["Date"])
     swe = swe[
         (pd.to_datetime(swe['Date']) >= start_date) &
         (pd.to_datetime(swe['Date']) <= end_date)
