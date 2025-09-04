@@ -1,7 +1,9 @@
 import torch
 
 def mse_loss(preds: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-    """Mean Squared Error."""
+    """
+    Mean Squared Error.
+    """
     return torch.mean((preds - targets) ** 2)
 
 
@@ -28,7 +30,6 @@ def get_loss_function(cfg):
     Build a loss function based on config.yaml.
     Supports MSE, NSE, or weighted combos.
     """
-    # Single loss
     if isinstance(cfg.loss, str):
         if cfg.loss.upper() == "MSE":
             return mse_loss
@@ -37,7 +38,6 @@ def get_loss_function(cfg):
         else:
             raise ValueError(f"Unknown loss: {cfg.loss}")
 
-    # Multiple losses with weights
     elif isinstance(cfg.loss, (list, tuple)):
         weights = cfg.loss_weights
         funcs = []

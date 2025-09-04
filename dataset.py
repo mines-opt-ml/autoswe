@@ -20,7 +20,6 @@ class SWEStationDataset(Dataset):
 
         self.beginning_of_snow_year = self.cfg.beginning_of_snow_year
         self.end_of_snow_year = self.cfg.end_of_snow_year
-        # Global span that covers train/val/test
         self.global_start_year = min(
             self.cfg.train_start_year, self.cfg.val_start_year, self.cfg.test_start_year
         )
@@ -29,29 +28,22 @@ class SWEStationDataset(Dataset):
         )
         self.dynamic_forcing_and_swe, self.snotel_attributes = preprocess(cfg)
 
-        # Ensure numeric columns are floats
         self.dynamic_forcing_and_swe = self.dynamic_forcing_and_swe.apply(
             lambda col: col.astype(float) if col.dtype in ["int64", "int32"] else col
         )
 
         self.obs_swe = self.dynamic_forcing_and_swe[["Station", "Date", "SWE"]].copy()
 
-        # Training mask (for fitting normalizers)
         years = pd.to_datetime(self.dynamic_forcing_and_swe["Date"]).dt.year
         train_mask = (years >= cfg.train_start_year) & (years <= cfg.train_end_year)
 
-        # ---------------------------
-        # Per-station normalizers
-        # ---------------------------
         self.station_normalizers = {}
         self.swe_normalizers = {}
         method = getattr(cfg, "normalization", "zscore")
 
-        # Iterate over stations
         for station in self.dynamic_forcing_and_swe["Station"].unique():
             station_mask = (self.dynamic_forcing_and_swe["Station"] == station) & train_mask
 
-            # Inputs (dynamic forcings only, SWE excluded)
             train_inputs = (
                 self.dynamic_forcing_and_swe.loc[station_mask]
                 .drop(columns=["SWE"])
@@ -62,14 +54,12 @@ class SWEStationDataset(Dataset):
                 input_norm.fit(train_inputs)
             self.station_normalizers[station] = input_norm
 
-            # SWE targets
             train_targets = self.dynamic_forcing_and_swe.loc[station_mask, ["SWE"]]
             swe_norm = Normalizer(method=method)
             if len(train_targets) > 0:
                 swe_norm.fit(train_targets)
             self.swe_normalizers[station] = swe_norm
 
-        # Apply normalization: inputs
         inputs_normed = []
         for station, norm in self.station_normalizers.items():
             station_mask = self.dynamic_forcing_and_swe["Station"] == station
@@ -87,7 +77,6 @@ class SWEStationDataset(Dataset):
         inputs_normed_df = pd.concat(inputs_normed, axis=0)
         self.dynamic_forcing_and_swe.update(inputs_normed_df)
 
-        # Apply normalization: SWE
         swe_normed = []
         for station, norm in self.swe_normalizers.items():
             station_mask = self.dynamic_forcing_and_swe["Station"] == station
@@ -100,7 +89,6 @@ class SWEStationDataset(Dataset):
         swe_normed_df = pd.concat(swe_normed, axis=0)
         self.dynamic_forcing_and_swe.update(swe_normed_df)
 
-        # Restrict by snow-year range (use proper datetimes)
         start = pd.to_datetime(f"{self.global_start_year}-{self.beginning_of_snow_year}")
         end = pd.to_datetime(f"{self.global_end_year}-12-31")
         self.dynamic_forcing_and_swe = self.dynamic_forcing_and_swe[
@@ -108,13 +96,11 @@ class SWEStationDataset(Dataset):
             (self.dynamic_forcing_and_swe["Date"] <= end)
         ].copy()
 
-        # Restrict metadata to valid stations
         valid_stations = self.dynamic_forcing_and_swe["Station"].unique()
         self.snotel_attributes = self.snotel_attributes[
             self.snotel_attributes["Station"].isin(valid_stations)
         ].copy()
 
-        # Build lookup table
         self.dynamic_forcing_and_swe["Date"] = pd.to_datetime(self.dynamic_forcing_and_swe["Date"])
         self.lookup_table = []
 
@@ -145,7 +131,9 @@ class SWEStationDataset(Dataset):
                 })
 
     def build_features(df: pd.DataFrame) -> pd.DataFrame:
-        """Construct feature DataFrame from raw data."""
+        """
+        Construct feature DataFrame from raw data.
+        """
         return pd.DataFrame(
             {
                 "Elevation": df["Elevation_x"],
@@ -231,7 +219,9 @@ class SWEStationDataset(Dataset):
         return sample
 
     def get(self, station: str, year: int) -> Dict[str, torch.Tensor]:
-        """Get data for a specific station and year."""
+        """
+        Get data for a specific station and year.
+        """
         for idx, entry in enumerate(self.lookup_table):
             if entry["Station"] == station and entry["Year"] == year:
                 return self.__getitem__(idx)

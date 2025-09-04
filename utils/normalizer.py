@@ -11,7 +11,8 @@ class Normalizer:
         self.stats = {}
 
     def fit(self, df: pd.DataFrame):
-        """Compute normalization stats per column from training data."""
+        """
+        Compute normalization stats per column from training data."""
         for col in df.columns:
             vals = df[col].dropna().values
             if self.method == "zscore":
@@ -26,7 +27,9 @@ class Normalizer:
                 raise ValueError(f"Unknown method: {self.method}")
 
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Apply normalization using stored stats."""
+        """
+        Apply normalization using stored stats.
+        """
         df_norm = df.copy()
         for col in df.columns:
             if col not in self.stats:
@@ -40,7 +43,9 @@ class Normalizer:
         return df_norm
 
     def inverse_transform(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Undo normalization."""
+        """
+        Undo normalization.
+        """
         df_inv = df.copy()
         for col in df.columns:
             if col not in self.stats:

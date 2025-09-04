@@ -5,22 +5,14 @@ import pandas as pd
 from scipy.spatial import cKDTree
 from scipy.spatial.distance import cdist
 from scipy.linalg import cholesky
-from utils import matern  # your code uses matern.Matern
+from utils import matern  
 
-
-# ------------------------------
-# Precomputed neighbor weights
-# ------------------------------
 @dataclass
 class PrecomputedWeights:
-    nn_index: np.ndarray  # [N, M] neighbor indices for each station
-    A: np.ndarray         # [N, M] neighbor weights a_i
-    w: np.ndarray         # [N,]   scalar weights w_i (variance scale)
+    nn_index: np.ndarray  
+    A: np.ndarray         
+    w: np.ndarray         
 
-
-# ------------------------------
-# Weight precomputation
-# ------------------------------
 def precompute_weights(
     trainLocs: np.ndarray,
     M: int,
@@ -30,7 +22,6 @@ def precompute_weights(
 ) -> PrecomputedWeights:
     """
     Precompute per-station neighbor weights (a_i) and scalars (w_i) once.
-
     Assumes trainLocs is ordered in the same station order that will be used
     when constructing (per-date) station vectors for the transform.
     """
@@ -40,9 +31,8 @@ def precompute_weights(
     M_eff = int(min(max(1, M), max(1, N - 1)))
 
     tree = cKDTree(trainLocs)
-    # First neighbor is the point itself; skip it
     _, inds = tree.query(trainLocs, k=M_eff + 1)
-    nn_index = inds[:, 1:].astype(np.int64)  # [N, M_eff]
+    nn_index = inds[:, 1:].astype(np.int64)  
 
     A = np.empty((N, M_eff), dtype=np.float32)
     w = np.empty((N,), dtype=np.float32)
@@ -50,23 +40,19 @@ def precompute_weights(
     I = np.eye(M_eff + 1, dtype=np.float32)
 
     for i in range(N):
-        nbrs = nn_index[i]                        # (M_eff,)
-        idxs = np.concatenate(([i], nbrs))       # (M_eff+1,)
-        locs = trainLocs[idxs]                   # (M_eff+1, 2)
+        nbrs = nn_index[i]                      
+        idxs = np.concatenate(([i], nbrs))       
+        locs = trainLocs[idxs]                  
 
-        # Build covariance with Matern
         D = cdist(locs, locs)
         K = matern.Matern(D, range_param, smoothness, phi=1.0).astype(np.float32)
         R = (1.0 - nugget) * K + nugget * I
 
-        # Solve for a_i via Cholesky on R[1:,1:]
         chol = cholesky(R[1:, 1:], lower=False, overwrite_a=False, check_finite=True)
         t = np.linalg.solve(chol.T, R[0, 1:])
-        a = np.linalg.solve(chol, t).astype(np.float32)  # (M_eff,)
+        a = np.linalg.solve(chol, t).astype(np.float32)  
 
-        # w_i = 1 - a^T * R_{neighbors, self}
         wi = np.float32(1.0 - a @ R[1:, 0])
-        # Numerical guard (avoid div-by-0 and negatives from roundoff)
         wi = np.float32(max(wi, 1e-8))
 
         A[i, :] = a
@@ -74,10 +60,6 @@ def precompute_weights(
 
     return PrecomputedWeights(nn_index=nn_index, A=A, w=w)
 
-
-# ------------------------------
-# Fast transform (multi-column)
-# ------------------------------
 def fast_transform_with_weights(
     trainData: pd.DataFrame,
     target: str,
@@ -89,27 +71,6 @@ def fast_transform_with_weights(
     """
     Apply spatial transform with precomputed weights to the target AND the
     selected input columns (decorrelate inputs too).
-
-    IMPORTANT ASSUMPTIONS:
-      • trainData rows represent a SINGLE snapshot across stations
-        (e.g., one Date), in the SAME station order used when precomputing
-        weights. In other words, len(trainData) must equal weights.nn_index.shape[0].
-      • If you have multiple dates, call this function per-date (group by Date),
-        reindex to the station order used for weight precompute, then call.
-
-    Args:
-        trainData: DataFrame with shape [N_stations, ...].
-                   Must include 'target' column and any input columns to transform.
-        target:    Name of the target column (e.g., "SWE").
-        weights:   PrecomputedWeights from precompute_weights(...).
-        cols_to_transform: Which input columns to decorrelate in addition to the target.
-                           If None, defaults to: all numeric columns except target and static_cols.
-        static_cols: Columns to EXCLUDE from transform even if numeric
-                     (e.g., Elevation, Slope, Aspect, Latitude, Longitude).
-                     If None, a sensible default list is used.
-        station_col: Optional station column name. If provided, we assert uniqueness and
-                     use it only for helpful error messages (no reordering is done here).
-
     Returns:
         DataFrame with the same columns as trainData,
         where 'target' and selected input columns are decorrelated.
@@ -125,52 +86,42 @@ def fast_transform_with_weights(
         raise ValueError(msg)
 
     if static_cols is None:
-        # Common static fields to skip from decorrelation
         static_cols = [
             "Elevation", "Slope", "Aspect", "Latitude", "Longitude",
             "Elevation_x", "Slope_tif1_x", "Aspect_tif_x", "Latitude_x", "Longitude_x",
             "Elevation_y", "Slope_tif1_y", "Aspect_tif_y", "Latitude_y", "Longitude_y",
         ]
 
-    # Determine which input columns to decorrelate
     if cols_to_transform is None:
         numeric_cols = trainData.select_dtypes(include=[np.number]).columns.tolist()
         cols_to_transform = [c for c in numeric_cols if c != target and c not in static_cols]
 
     out = trainData.copy()
 
-    # Prepare arrays
-    y = out[target].to_numpy(dtype=np.float32)         # (N,)
+    y = out[target].to_numpy(dtype=np.float32)         
     N = y.shape[0]
     M = weights.nn_index.shape[1]
 
-    # Transform target
     y_out = np.empty_like(y, dtype=np.float32)
     for i in range(N):
-        a = weights.A[i]                 # (M,)
-        nbrs = weights.nn_index[i]       # (M,)
-        denom = np.sqrt(weights.w[i])    # scalar
-        # y_i' = (y_i - a^T y_nbrs) / sqrt(w_i)
+        a = weights.A[i]                 
+        nbrs = weights.nn_index[i]       
+        denom = np.sqrt(weights.w[i])    
         y_out[i] = (y[i] - np.dot(a, y[nbrs])) / denom
     out[target] = y_out
 
-    # Transform selected input columns
     if cols_to_transform:
-        X = out[cols_to_transform].to_numpy(dtype=np.float32)  # (N, P)
+        X = out[cols_to_transform].to_numpy(dtype=np.float32)  
         X_out = np.empty_like(X, dtype=np.float32)
 
-        # For each station i, decorrelate row i using neighbor rows
         for i in range(N):
-            a = weights.A[i]               # (M,)
-            nbrs = weights.nn_index[i]     # (M,)
-            denom = np.sqrt(weights.w[i])  # scalar
-            # X_i' = (X_i - a^T X_nbrs) / sqrt(w_i)
-            # X[nbrs] -> (M, P); a @ X[nbrs] -> (P,)
+            a = weights.A[i]               
+            nbrs = weights.nn_index[i]     
+            denom = np.sqrt(weights.w[i])  
             X_out[i, :] = (X[i, :] - a @ X[nbrs, :]) / denom
 
         out.loc[:, cols_to_transform] = X_out
 
-    # Optional sanity check for duplicates/misalignment
     if station_col is not None and station_col in out.columns:
         if out[station_col].duplicated().any():
             raise ValueError(
@@ -180,10 +131,6 @@ def fast_transform_with_weights(
 
     return out
 
-
-# ------------------------------
-# Row-wise reference implementation (kept for parity/tests)
-# ------------------------------
 def process_row(
     idx: int,
     ytrain: pd.Series,
@@ -198,7 +145,6 @@ def process_row(
     Reference (slower) single-row transform that recomputes local Matern per row.
     Useful for testing; the fast path should be used for production.
     """
-    # Build local index set: [i] + neighbors(i)
     nbrs = nnList[idx]
     idxs = np.concatenate(([idx], np.asarray(nbrs, dtype=np.int64)))
     locs = trainLocs[idxs]
@@ -208,7 +154,6 @@ def process_row(
     R = (1.0 - nugget) * covariance_matrix + (nugget * np.eye(D.shape[0], dtype=np.float32))
 
     if R.shape[0] == 1:
-        # No neighbors case: just scale by sqrt(w)=1
         y = np.float32(ytrain.iloc[idx])
         X = Xtrain.iloc[idx].to_numpy(dtype=np.float32)
         w = np.float32(1.0)
@@ -216,16 +161,16 @@ def process_row(
 
     chol = cholesky(R[1:, 1:], lower=False, overwrite_a=False, check_finite=True)
     t = np.linalg.solve(chol.T, R[0, 1:])
-    a = np.linalg.solve(chol, t).astype(np.float32)  # (M,)
+    a = np.linalg.solve(chol, t).astype(np.float32)  
 
     wi = np.float32(1.0 - a @ R[1:, 0])
-    wi = np.float32(max(wi, 1e-8))  # guard
+    wi = np.float32(max(wi, 1e-8))  
 
     denom = np.sqrt(wi).astype(np.float32)
-    Xnbr = Xtrain.iloc[nbrs].to_numpy(dtype=np.float32)  # (M, P)
-    Xin = Xtrain.iloc[idx].to_numpy(dtype=np.float32)    # (P,)
+    Xnbr = Xtrain.iloc[nbrs].to_numpy(dtype=np.float32)  
+    Xin = Xtrain.iloc[idx].to_numpy(dtype=np.float32)    
     Yin = np.float32(ytrain.iloc[idx])
-    Ynbr = ytrain.iloc[nbrs].to_numpy(dtype=np.float32)  # (M,)
+    Ynbr = ytrain.iloc[nbrs].to_numpy(dtype=np.float32)  
 
     X_out = (Xin - a @ Xnbr) / denom
     y_out = (Yin - a @ Ynbr) / denom
@@ -233,7 +178,7 @@ def process_row(
     return {"y": y_out, "X": X_out, "w": wi}
 
 
-# End of NEW CODE
+# End of new code; Heaton. et. al (2024) code below
 
 
 def process_test_data(
