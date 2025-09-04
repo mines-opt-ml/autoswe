@@ -206,7 +206,7 @@ class SWEStationDataset(Dataset):
 
         sample = {
             "dynamic forcing": torch.tensor(features.values, dtype=torch.float32),
-            "swe": torch.tensor(data["SWE"].values, dtype=torch.float32),  # SWE is already normalized
+            "swe": torch.tensor(data["SWE"].values, dtype=torch.float32),  
             "dates": data["Date"].dt.strftime("%Y-%m-%d").values,
             "snotel attributes": torch.tensor(
                 self.snotel_attributes.loc[self.snotel_attributes["Station"] == station, ["Elevation", "Slope", "Aspect"]].values,
