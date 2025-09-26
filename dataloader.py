@@ -29,7 +29,6 @@ class SWEDataLoader:
         
         dataset.dynamic_forcing_and_swe = dataset.dynamic_forcing_and_swe.reset_index()
         
-        stations = orig_swe["Station"].unique()
         MIN_COVERAGE = 95.0
         complete_stations = []
         
@@ -187,6 +186,26 @@ class SWEDataLoader:
             for col in cols_to_decor:
                 dataset.dynamic_forcing_and_swe.loc[time_mask, col] = updated[f"{col}_decor"].values
 
+        if getattr(self.cfg, "anomaly_target", False):
+            df_all = dataset.dynamic_forcing_and_swe.copy()
+            df_all["DOY"] = pd.to_datetime(df_all["Date"]).dt.dayofyear
+            train_mask = df_all["Date"].dt.year.isin(self.train_years)
+            climo_model = (
+                df_all.loc[train_mask]
+                .groupby(["Station", "DOY"])["SWE"]
+                .mean()
+                .reset_index()
+                .rename(columns={"SWE": "SWE_climo"})
+            )
+            station_train_mean = (
+                df_all.loc[train_mask].groupby("Station")["SWE"].mean().rename("SWE_climo_fallback")
+            )
+            df_all = df_all.merge(climo_model, on=["Station", "DOY"], how="left")
+            df_all = df_all.merge(station_train_mean, on="Station", how="left")
+            df_all["SWE_climo"] = df_all["SWE_climo"].fillna(df_all["SWE_climo_fallback"]).fillna(0.0)
+            df_all = df_all.drop(columns=["SWE_climo_fallback", "DOY"])
+            dataset.dynamic_forcing_and_swe = df_all
+
         train_dataset = Subset(dataset, train_indices)
         val_dataset = Subset(dataset, val_indices)
         test_dataset = Subset(dataset, test_indices)
@@ -220,28 +239,29 @@ class SWEDataLoader:
 
     @staticmethod
     def collate_fn(batch: List[Dict]) -> Dict[str, torch.Tensor]:
-        """
-        Custom collate function to pad sequences in batch to same length.
-        """
         dynamic = [item['dynamic forcing'] for item in batch]
         swe = [item['swe'] for item in batch]
-
+        has_climo = 'swe_climo' in batch[0]
+        if has_climo:
+            swe_clm = [item['swe_climo'] for item in batch]
         metadata = {
             key: [item[key] for item in batch]
             for key in batch[0].keys()
-            if key not in ['dynamic forcing', 'swe']
+            if key not in ['dynamic forcing', 'swe', 'swe_climo']
         }
-
         dynamic_pad = pad_sequence(dynamic, batch_first=True)
         swe_pad = pad_sequence(swe, batch_first=True)
-
+        if has_climo:
+            swe_clm_pad = pad_sequence(swe_clm, batch_first=True)
         lengths = torch.tensor([len(x) for x in dynamic])
         max_len = lengths.max()
         mask = torch.arange(max_len)[None, :] < lengths[:, None]
-
-        return {
+        out = {
             'dynamic forcing': dynamic_pad,
             'swe': swe_pad,
             'mask': mask,
             **metadata
         }
+        if has_climo:
+            out['swe_climo'] = swe_clm_pad
+        return out

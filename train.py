@@ -158,6 +158,13 @@ def train_model(cfg: SimpleNamespace):
             y = batch["swe"].to(device)
             stations = batch["station"]
             outputs = model(X, stations=stations)
+            if getattr(cfg, "anomaly_target", False):
+                if "swe_climo" not in batch:
+                    raise RuntimeError("anomaly_target=True but 'swe_climo' missing from batch.")
+                climo = batch["swe_climo"].to(device)
+                y_target = y - climo
+            else:
+                y_target = y
             mask = batch["mask"].to(outputs.device).float()
             if isinstance(cfg.loss, str):
                 if cfg.loss.upper() == "MSE":
@@ -195,6 +202,12 @@ def train_model(cfg: SimpleNamespace):
                 dates = batch["dates"]
                 preds = model(X, stations=stations)
                 preds_base_swe = hist_mean_model(X, stations=stations, dates=dates)
+                if getattr(cfg, "anomaly_target", False):
+                    if "swe_climo" not in batch:
+                        raise RuntimeError("anomaly_target=True but 'swe_climo' missing from batch.")
+                    climo = batch["swe_climo"].to(device)
+                else:
+                    climo = None
                 mask = batch["mask"]
                 for i in range(len(stations)):
                     station = stations[i]
@@ -204,7 +217,7 @@ def train_model(cfg: SimpleNamespace):
                         date_str = pd.to_datetime(dates[i][t]).strftime("%Y-%m-%d")
                         if date_str not in backtrans_cache:
                             continue
-                        pred_prime = preds[i, t].item()
+                        pred_prime = (preds[i, t] + climo[i, t]).item() if climo is not None else preds[i, t].item()
                         z_hat = back_transform_scalar_with_weights(
                             pred_prime=pred_prime,
                             station_idx=station_index[station],
@@ -285,6 +298,12 @@ def train_model(cfg: SimpleNamespace):
             dates = batch["dates"]
             preds = model(X, stations=stations)
             preds_base_swe = hist_mean_model(X, stations=stations, dates=dates)
+            if getattr(cfg, "anomaly_target", False):
+                if "swe_climo" not in batch:
+                    raise RuntimeError("anomaly_target=True but 'swe_climo' missing from batch.")
+                climo = batch["swe_climo"].to(device)
+            else:
+                climo = None
             for i in range(len(stations)):
                 station = stations[i]
                 valid_timesteps = int(mask[i].sum().item())
@@ -293,7 +312,7 @@ def train_model(cfg: SimpleNamespace):
                     date_str = pd.to_datetime(dates[i][t]).strftime("%Y-%m-%d")
                     if date_str not in backtrans_cache:
                         continue
-                    pred_prime = preds[i, t].item()
+                    pred_prime = (preds[i, t] + climo[i, t]).item() if climo is not None else preds[i, t].item()
                     z_hat = back_transform_scalar_with_weights(
                         pred_prime=pred_prime,
                         station_idx=station_index[station],
@@ -380,4 +399,5 @@ if __name__ == "__main__":
     with open("config.yaml", "r") as f:
         cfg_dict = yaml.safe_load(f)
     cfg = SimpleNamespace(**cfg_dict)
+    print(f"Training mode: {'ANOMALY' if getattr(cfg, 'anomaly_target', False) else 'DIRECT'}")
     model = train_model(cfg)
