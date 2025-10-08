@@ -20,16 +20,17 @@ hidden_size: 256
 num_layers: 4
 batch_size: 512
 lr: 0.001
-n_epochs: 50
+n_epochs: 10
 smoothness: 1.0
 range_param: 2.0
 nugget: 0.1
 M: 20
 ncores: 4
-device: cuda:0
+device: cuda:1
 shuffle: true
 save: true
 save_path: results/model.pt
-loss: [MSE, NSE] #options: MSE, NSE, or [MSE, NSE]
-loss_weights: [0.7, 0.3] #if [MSE, NSE], insert desired [MSEweight, NSEweight] here
+loss: [MSE] #options: MSE, NSE, or [MSE, NSE]
+loss_weights: [1.0] #if [MSE, NSE], insert desired [MSEweight, NSEweight] here
 normalization: "zscore"   #options: zscore, minmax
+anomaly_target: false  

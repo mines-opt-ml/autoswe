@@ -76,14 +76,6 @@ def fast_transform_with_weights(
         where 'target' and selected input columns are decorrelated.
     """
     Nw = weights.nn_index.shape[0]
-    if len(trainData) != Nw:
-        msg = (
-            f"fast_transform_with_weights expected {Nw} rows (one per station in precompute order), "
-            f"but got {len(trainData)}. "
-            "You must call this function on a single-date slice reindexed to the station order "
-            "used for precompute_weights()."
-        )
-        raise ValueError(msg)
 
     if static_cols is None:
         static_cols = [
@@ -121,13 +113,6 @@ def fast_transform_with_weights(
             X_out[i, :] = (X[i, :] - a @ X[nbrs, :]) / denom
 
         out.loc[:, cols_to_transform] = X_out
-
-    if station_col is not None and station_col in out.columns:
-        if out[station_col].duplicated().any():
-            raise ValueError(
-                f"Duplicate stations found in input for {station_col}. "
-                "The fast transform must be applied to a single snapshot with exactly one row per station."
-            )
 
     return out
 

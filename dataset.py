@@ -215,7 +215,9 @@ class SWEStationDataset(Dataset):
             "year": year,
             "station": station,
         }
-
+        if "SWE_climo" in data.columns:
+            sample["swe_climo"] = torch.tensor(data["SWE_climo"].values, dtype=torch.float32)
+        
         return sample
 
     def get(self, station: str, year: int) -> Dict[str, torch.Tensor]:
