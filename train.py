@@ -1,20 +1,22 @@
+import argparse
 import os
 import time
 from types import SimpleNamespace
 from typing import Tuple
+
 import numpy as np
 import pandas as pd
 import torch
 import yaml
 from sklearn.metrics import mean_squared_error
-import argparse
 
 from dataloader import SWEDataLoader, SWEStationDataset
-from modelzoo.LSTM import SWE_Net
 from modelzoo.HistoricalMean import HistoricalMean
+from modelzoo.LSTM import SWE_Net
 from utils.backtransform import back_transform_scalar_with_weights
 
 
+# move these metrics to a utils.metrics.py file
 def masked_mse(preds: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     """Mean squared error over valid (mask==1) elements only."""
     se = (preds - targets) ** 2
@@ -24,7 +26,7 @@ def masked_mse(preds: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor) -
 
 
 def masked_nse(preds: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
-    """Nash–Sutcliffe Efficiency loss over valid elements only, as a minimization objective."""
+    """Nash-Sutcliffe Efficiency loss over valid elements only, as a minimization objective."""
     valid = mask > 0.5
     if valid.sum() == 0:
         return torch.tensor(0.0, device=preds.device)
@@ -36,33 +38,24 @@ def masked_nse(preds: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor, e
     return num / den
 
 
+# Seems like there is duplication between this function and the masked_mse/masked_nse functions above? Or perhaps I'm not understandin the role of the mask correctly?
 def compute_station_metrics(predictions_df: pd.DataFrame):
     """Compute NSE and RMSE per station. Expects: ['station','actual_swe','predicted_swe']."""
     station_metrics = []
-    for station in predictions_df['station'].unique():
-        station_data = predictions_df[predictions_df['station'] == station]
-        actual = station_data['actual_swe'].values
-        predicted = station_data['predicted_swe'].values
+    for station in predictions_df["station"].unique():
+        station_data = predictions_df[predictions_df["station"] == station]
+        actual = station_data["actual_swe"].values
+        predicted = station_data["predicted_swe"].values
         mean_observed = np.mean(actual)
         ss_res = np.sum((actual - predicted) ** 2)
         ss_tot = np.sum((np.array(actual) - mean_observed) ** 2)
         nse = 1 - (ss_res / ss_tot) if ss_tot > 0 else np.nan
         rmse = np.sqrt(mean_squared_error(actual, predicted))
-        station_metrics.append({
-            'station': station,
-            'nse': nse,
-            'rmse': rmse,
-            'n_predictions': len(actual)
-        })
+        station_metrics.append({"station": station, "nse": nse, "rmse": rmse, "n_predictions": len(actual)})
     return pd.DataFrame(station_metrics)
 
 
-def build_backtrans_cache_normalized_from_obs(
-    obs_swe: pd.DataFrame,
-    swe_normalizers: dict,
-    station_index: dict,
-    weights
-) -> dict:
+def build_backtrans_cache_normalized_from_obs(obs_swe: pd.DataFrame, swe_normalizers: dict, station_index: dict, weights) -> dict:
     """Build per-date offsets using normalized SWE so the Heaton back-transform returns normalized predictions."""
     df = obs_swe.copy()
     df["Date"] = pd.to_datetime(df["Date"])
@@ -79,7 +72,7 @@ def build_backtrans_cache_normalized_from_obs(
     stds = np.array(stds, dtype=np.float32)
     cache = {}
     for dt in sorted(df["Date"].unique()):
-        day = (df[df["Date"] == dt].set_index("Station").reindex(station_order))
+        day = df[df["Date"] == dt].set_index("Station").reindex(station_order)
         y = day["SWE"].to_numpy(dtype=np.float32)
         y_norm = (y - means) / (stds + 1e-6)
         y_norm = np.nan_to_num(y_norm, nan=0.0)
@@ -88,14 +81,11 @@ def build_backtrans_cache_normalized_from_obs(
     return cache
 
 
-def build_doy_climatology(
-    obs_swe: pd.DataFrame,
-    train_start: int,
-    train_end: int
-) -> Tuple[pd.Series, pd.Series]:
+def build_doy_climatology(obs_swe: pd.DataFrame, train_start: int, train_end: int) -> Tuple[pd.Series, pd.Series]:
     """Build per-station, per-DOY climatology using TRAIN years only."""
     df = obs_swe.copy()
     df["Date"] = pd.to_datetime(df["Date"])
+    # The line below assumes the train years are contiguous. Consider changing to something like in(train_years) for robustness.
     mask = (df["Date"].dt.year >= train_start) & (df["Date"].dt.year <= train_end)
     train_df = df.loc[mask].copy()
     train_df["DOY"] = train_df["Date"].dt.dayofyear
@@ -106,30 +96,29 @@ def build_doy_climatology(
 
 def train_model(cfg: SimpleNamespace):
     device = torch.device(cfg.device)
-    dataset = SWEStationDataset(cfg)
+    dataset = SWEStationDataset(
+        cfg
+    )  # I think this dataset variable is unused. the SWEDataLoader creates its own instance of SWEStationDataset. I'd suggest passing dataset to SWEDataLoader as an argument. But, removing this line and just having SWEDataLoader do it all would also be acceptable.
     orig_swe = dataset.obs_swe.copy()
     orig_swe["Date"] = pd.to_datetime(orig_swe["Date"]).dt.strftime("%Y-%m-%d")
     swe_lookup = orig_swe.set_index(["Station", "Date"])["SWE"]
     swe_normalizers = dataset.swe_normalizers
     climo, station_mean = build_doy_climatology(
-        obs_swe=dataset.obs_swe,
-        train_start=cfg.train_start_year,
-        train_end=cfg.train_end_year
+        obs_swe=dataset.obs_swe, train_start=cfg.train_start_year, train_end=cfg.train_end_year
     )
     dataloader = SWEDataLoader(cfg)
     train_loader, val_loader, test_loader, _, bt_info = dataloader.prepare()
     station_index = bt_info["station_index"]
     weights = bt_info["weights"]
     backtrans_cache = build_backtrans_cache_normalized_from_obs(
-        obs_swe=dataset.obs_swe,
-        swe_normalizers=swe_normalizers,
-        station_index=station_index,
-        weights=weights
+        obs_swe=dataset.obs_swe, swe_normalizers=swe_normalizers, station_index=station_index, weights=weights
     )
     raw = dataset.obs_swe.copy()
     raw["Date"] = pd.to_datetime(raw["Date"])
+    # Could you give m a more informative name? I'm not really sure what its for.
     m = (raw["Date"].dt.year >= cfg.train_start_year) & (raw["Date"].dt.year <= cfg.train_end_year)
     tr = raw.loc[m]
+    # Let's chat more about these means. It's not entirely clear to me they are day-wise over all training snow yeras.
     station_mean_swe = tr.groupby("Station")["SWE"].mean()
     station_std_swe = tr.groupby("Station")["SWE"].std()
     station_stats_dict = {}
@@ -137,11 +126,8 @@ def train_model(cfg: SimpleNamespace):
         station_stats_dict[station] = (float(station_mean_swe[station]), float(station_std_swe[station]))
     model = SWE_Net(cfg, station_stats=station_stats_dict).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', patience=8, factor=0.7)
-    hist_mean_model = HistoricalMean(
-        climo_lookup=climo.to_dict(),
-        station_mean=station_mean.to_dict()
-    ).to(device)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="max", patience=8, factor=0.7)
+    hist_mean_model = HistoricalMean(climo_lookup=climo.to_dict(), station_mean=station_mean.to_dict()).to(device)
     hist_mean_model.eval()
     best_val_nse = float("-inf")
     best_epoch = -1
@@ -226,9 +212,7 @@ def train_model(cfg: SimpleNamespace):
                             backtrans_cache=backtrans_cache,
                         )
                         if swe_norm is not None:
-                            pred_value = swe_norm.inverse_transform(
-                                pd.DataFrame([[z_hat]], columns=["SWE"])
-                            )["SWE"].iloc[0]
+                            pred_value = swe_norm.inverse_transform(pd.DataFrame([[z_hat]], columns=["SWE"]))["SWE"].iloc[0]
                         else:
                             pred_value = z_hat
                         pred_value = max(0.0, pred_value)
@@ -237,13 +221,15 @@ def train_model(cfg: SimpleNamespace):
                         val_baseline.append(base_val)
                         val_preds.append(pred_value)
                         val_targets.append(actual_swe)
-                        epoch_predictions.append({
-                            "station": station,
-                            "date": date_str,
-                            "predicted_swe": pred_value,
-                            "baseline_swe": base_val,
-                            "actual_swe": actual_swe
-                        })
+                        epoch_predictions.append(
+                            {
+                                "station": station,
+                                "date": date_str,
+                                "predicted_swe": pred_value,
+                                "baseline_swe": base_val,
+                                "actual_swe": actual_swe,
+                            }
+                        )
         if val_preds:
             rmse = np.sqrt(mean_squared_error(val_targets, val_preds))
             mean_observed = np.mean(val_targets)
@@ -257,9 +243,11 @@ def train_model(cfg: SimpleNamespace):
                 base_ss_res = np.sum((np.array(val_targets) - np.array(val_baseline)) ** 2)
                 base_nse = 1 - (base_ss_res / ss_tot) if ss_tot > 0 else np.nan
                 skill_rmse = 1.0 - (rmse / base_rmse) if base_rmse > 0 else np.nan
-                print(f"Baseline (Climatology) → RMSE: {base_rmse:.4f} | NSE: {base_nse:.4f} | RMSE Skill vs Clim: {skill_rmse:.4f}")
+                print(
+                    f"Baseline (Climatology) → RMSE: {base_rmse:.4f} | NSE: {base_nse:.4f} | RMSE Skill vs Clim: {skill_rmse:.4f}"
+                )
             station_metrics_df = compute_station_metrics(pd.DataFrame(epoch_predictions))
-            valid_nse = station_metrics_df['nse'].dropna()
+            valid_nse = station_metrics_df["nse"].dropna()
             nse_le_0 = (valid_nse <= 0).sum()
             nse_0_to_3 = ((valid_nse > 0) & (valid_nse <= 0.3)).sum()
             nse_3_to_5 = ((valid_nse > 0.3) & (valid_nse <= 0.5)).sum()
@@ -321,9 +309,7 @@ def train_model(cfg: SimpleNamespace):
                         backtrans_cache=backtrans_cache,
                     )
                     if swe_norm is not None:
-                        pred_value = swe_norm.inverse_transform(
-                            pd.DataFrame([[z_hat]], columns=["SWE"])
-                        )["SWE"].iloc[0]
+                        pred_value = swe_norm.inverse_transform(pd.DataFrame([[z_hat]], columns=["SWE"]))["SWE"].iloc[0]
                     else:
                         pred_value = z_hat
                     pred_value = max(0.0, pred_value)
@@ -332,13 +318,15 @@ def train_model(cfg: SimpleNamespace):
                     test_baseline.append(base_val)
                     test_preds.append(pred_value)
                     test_targets.append(actual_swe)
-                    test_predictions.append({
-                        "station": station,
-                        "date": date_str,
-                        "predicted_swe": pred_value,
-                        "baseline_swe": base_val,
-                        "actual_swe": actual_swe
-                    })
+                    test_predictions.append(
+                        {
+                            "station": station,
+                            "date": date_str,
+                            "predicted_swe": pred_value,
+                            "baseline_swe": base_val,
+                            "actual_swe": actual_swe,
+                        }
+                    )
     if test_preds:
         rmse = np.sqrt(mean_squared_error(test_targets, test_preds))
         mean_observed = np.mean(test_targets)
@@ -350,7 +338,7 @@ def train_model(cfg: SimpleNamespace):
         print(f"TEST NSE : {nse:.4f}")
         print(f"TEST Predictions: {len(test_preds)}")
         station_metrics_df = compute_station_metrics(pd.DataFrame(test_predictions))
-        valid_nse = station_metrics_df['nse'].dropna()
+        valid_nse = station_metrics_df["nse"].dropna()
         print("\nStation-level NSE distribution (TEST, Model):")
         print(f"NSE ≤ 0          : {(valid_nse <= 0).sum():3d}")
         print(f"0 < NSE ≤ 0.3    : {((valid_nse > 0) & (valid_nse <= 0.3)).sum():3d}")
@@ -367,10 +355,11 @@ def train_model(cfg: SimpleNamespace):
             print(f"TEST Baseline NSE : {base_nse:.4f}")
             print(f"TEST RMSE Skill vs Clim: {skill_rmse:.4f}")
             baseline_metrics_df = compute_station_metrics(
-                pd.DataFrame(test_predictions)[["station", "baseline_swe", "actual_swe"]]
-                .rename(columns={"baseline_swe": "predicted_swe"})
+                pd.DataFrame(test_predictions)[["station", "baseline_swe", "actual_swe"]].rename(
+                    columns={"baseline_swe": "predicted_swe"}
+                )
             )
-            valid_nse_base = baseline_metrics_df['nse'].dropna()
+            valid_nse_base = baseline_metrics_df["nse"].dropna()
             print("\nStation-level NSE distribution (TEST, Baseline):")
             print(f"NSE ≤ 0          : {(valid_nse_base <= 0).sum():3d}")
             print(f"0 < NSE ≤ 0.3    : {((valid_nse_base > 0) & (valid_nse_base <= 0.3)).sum():3d}")
@@ -383,13 +372,15 @@ def train_model(cfg: SimpleNamespace):
         station_metrics_df.to_csv(os.path.join(output_dir, "test_station_metrics.csv"), index=False)
         preds_with_baseline = pd.DataFrame(test_predictions)
         preds_with_baseline.to_csv(os.path.join(output_dir, "test_predictions_with_baseline.csv"), index=False)
-        baseline_df = preds_with_baseline[["station", "date", "baseline_swe", "actual_swe"]].rename(columns={"baseline_swe": "predicted_swe"})
+        baseline_df = preds_with_baseline[["station", "date", "baseline_swe", "actual_swe"]].rename(
+            columns={"baseline_swe": "predicted_swe"}
+        )
         station_metrics_baseline = compute_station_metrics(baseline_df)[["station", "nse", "rmse", "n_predictions"]]
         station_metrics_baseline.to_csv(os.path.join(output_dir, "test_station_metrics_baseline.csv"), index=False)
-        print(f"Saved test predictions to results/test_predictions.csv")
-        print(f"Saved test station metrics to results/test_station_metrics.csv")
-        print(f"Saved test predictions (+ baseline) to results/test_predictions_with_baseline.csv")
-        print(f"Saved test station metrics (baseline) to results/test_station_metrics_baseline.csv")
+        print("Saved test predictions to results/test_predictions.csv")
+        print("Saved test station metrics to results/test_station_metrics.csv")
+        print("Saved test predictions (+ baseline) to results/test_predictions_with_baseline.csv")
+        print("Saved test station metrics (baseline) to results/test_station_metrics_baseline.csv")
     return model
 
 

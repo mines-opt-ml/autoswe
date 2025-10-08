@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-import torch
+
 
 class Normalizer:
     def __init__(self, method: str = "zscore"):
