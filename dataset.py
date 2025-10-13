@@ -6,6 +6,7 @@ from torch.utils.data import Dataset
 
 from utils.normalizer import Normalizer
 from utils.preprocess import preprocess
+from utils.snowyear_DOY_conversion import compute_day_of_snow_year
 
 
 class SWEStationDataset(Dataset):
@@ -95,9 +96,39 @@ class SWEStationDataset(Dataset):
         self.snotel_attributes = self.snotel_attributes[self.snotel_attributes["Station"].isin(valid_stations)].copy()
 
         self.dynamic_forcing_and_swe["Date"] = pd.to_datetime(self.dynamic_forcing_and_swe["Date"])
-        self.lookup_table = []
+        self.lookup_table = self._create_lookup_table()
 
+
+    def build_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Construct feature DataFrame from raw data.
+        """
+        return pd.DataFrame(
+            {
+                "Elevation": df["Elevation_x"],
+                "Slope": df["Slope_tif1_x"],
+                "Aspect": df["Aspect_tif_x"],
+                "Latitude": df["Latitude_x"],
+                "Longitude": df["Longitude_x"],
+                "DayOfYear": df["Date"].apply(lambda d: compute_day_of_snow_year(d, self.beginning_of_snow_year)),
+                "Tmax": df["Tmax"],
+                "Tmin": df["Tmin"],
+                "Precip": df["Precip"],
+                "Tobs": df["Tobs"],
+                "TB_19": df["TB_19"],
+                "TB_37": df["TB_37"],
+                "TB_diff": df["TB_diff"],
+            }
+        )
+
+    # This function is never called, and the code is somewhat duplicated in __init__
+    # recommend removing the duplicated code in __init__ and using something like:
+    # self.lookup_table = self._create_lookup_table() - DONE
+    def _create_lookup_table(self):
+        lookup = []
+        valid_stations = self.dynamic_forcing_and_swe["Station"].unique()
         years = range(self.global_start_year, self.global_end_year + 1)
+
         for station in valid_stations:
             for year in years:
                 start_date = pd.to_datetime(f"{year}-{self.beginning_of_snow_year}")
@@ -116,51 +147,12 @@ class SWEStationDataset(Dataset):
                         f"Check date types and snow-year slicing."
                     )
 
-                self.lookup_table.append(
+                lookup.append(
                     {
                         "Station": station,
                         "Year": year,
                         "StartDate": pd.Timestamp(start_date),
                         "EndOfSnowYearDate": pd.Timestamp(end_of_snow_year_date),
-                    }
-                )
-
-    def build_features(df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Construct feature DataFrame from raw data.
-        """
-        return pd.DataFrame(
-            {
-                "Elevation": df["Elevation_x"],
-                "Slope": df["Slope_tif1_x"],
-                "Aspect": df["Aspect_tif_x"],
-                "Latitude": df["Latitude_x"],
-                "Longitude": df["Longitude_x"],
-                "DayOfYear": pd.to_datetime(df["Date"]).dt.dayofyear,
-                "Tmax": df["Tmax"],
-                "Tmin": df["Tmin"],
-                "Precip": df["Precip"],
-                "Tobs": df["Tobs"],
-                "TB_19": df["TB_19"],
-                "TB_37": df["TB_37"],
-                "TB_diff": df["TB_diff"],
-            }
-        )
-
-    # This function is never called, and the code is somewhat duplicated in __init__
-    # recommend removing the duplicated code in __init__ and using something like:
-    # self.lookup_table = self._create_lookup_table()
-    def _create_lookup_table(self):
-        lookup = []
-        stations = self.dynamic_forcing_and_swe["Station"].drop_duplicates().values
-        for year in range(self.global_start_year, self.global_end_year - 1):
-            for station in stations:
-                lookup.append(
-                    {
-                        "Station": station,
-                        "Year": year,
-                        "StartDate": pd.to_datetime(f"{year}-{self.beginning_of_snow_year}"),
-                        "EndOfSnowYearDate": pd.to_datetime(f"{year + 1}-{self.end_of_snow_year}"),
                     }
                 )
         return lookup
@@ -191,7 +183,7 @@ class SWEStationDataset(Dataset):
                 "Aspect": data["Aspect_tif_x"],
                 "Latitude": data["Latitude_x"],
                 "Longitude": data["Longitude_x"],
-                "DayOfYear": pd.to_datetime(data["Date"]).dt.dayofyear,
+                "DayOfYear": data["Date"].apply(lambda d: compute_day_of_snow_year(d, self.beginning_of_snow_year)),
                 "Tmax": data["Tmax"],
                 "Tmin": data["Tmin"],
                 "Precip": data["Precip"],

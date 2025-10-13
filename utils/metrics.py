@@ -56,3 +56,23 @@ def get_loss_function(cfg):
 
     else:
         raise ValueError("cfg.loss must be str or list")
+
+def masked_mse(preds: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """Mean squared error over valid (mask==1) elements only."""
+    se = (preds - targets) ** 2
+    se = se * mask
+    denom = mask.sum().clamp_min(1.0)
+    return se.sum() / denom
+
+
+def masked_nse(preds: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    """Nash-Sutcliffe Efficiency loss over valid elements only, as a minimization objective."""
+    valid = mask > 0.5
+    if valid.sum() == 0:
+        return torch.tensor(0.0, device=preds.device)
+    p = preds[valid]
+    t = targets[valid]
+    mean_t = t.mean()
+    num = ((t - p) ** 2).sum()
+    den = ((t - mean_t) ** 2).sum().clamp_min(eps)
+    return num / den

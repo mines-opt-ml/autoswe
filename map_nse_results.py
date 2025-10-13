@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import geoplot as gplt
 import geoplot.crs as gcrs
 import geopandas as gpd
+from geopandas.datasets import get_path
 
 with open("config.yaml", "r") as f:
     cfg_dict = yaml.safe_load(f)
@@ -68,7 +69,8 @@ fig = plt.figure(figsize=(20, 8))
 ax1 = plt.subplot(1, 2, 1, projection=gcrs.PlateCarree())
 ax2 = plt.subplot(1, 2, 2)
 
-usa = gpd.read_file(gplt.datasets.get_path("contiguous_usa"))
+usa = gpd.read_file(get_path("naturalearth_lowres"), engine="pyogrio")
+usa = usa[usa["continent"] == "North America"]
 gplt.polyplot(usa, ax=ax1, facecolor='lightgray', edgecolor='black', linewidth=0.5)
 gdf = gpd.GeoDataFrame(
     station_df,

@@ -11,30 +11,43 @@ from utils.SpatialTransform import SpatialTransformer, fast_transform_with_weigh
 
 
 class SWEDataLoader:
-    def __init__(self, cfg):
+    def __init__(self, cfg, dataset = None):
         self.cfg = cfg
+        self.dataset = dataset
         self.train_years = range(cfg.train_start_year, cfg.train_end_year + 1)
         self.val_years = range(cfg.val_start_year, cfg.val_end_year + 1)
         self.test_years = range(cfg.test_start_year, cfg.test_end_year + 1)
-        # consider adding an assert station to ensure no overlap between the
-        # train, val, and test years.
+        
+        train_set = set(self.train_years)
+        val_set = set(self.val_years)
+        test_set = set(self.test_years)
+
+        overlaps = {
+            "train_val":  train_set & val_set,
+            "train_test": train_set & test_set,
+            "val_test":   val_set & test_set,
+        }
+        for name, years in overlaps.items():
+            assert not years, f"Year split overlap detected in {name}: {sorted(years)}. "\
+                              f"Check cfg.*_start_year / cfg.*_end_year."
 
     def prepare(self) -> Tuple[DataLoader, DataLoader, DataLoader, SpatialTransformer, dict]:
         """
         Create train,
           validation, and test data loaders with spatial decorrelation.
         """
-        dataset = SWEStationDataset(self.cfg)
+        dataset = self.dataset or SWEStationDataset(self.cfg)
 
         orig_swe = dataset.dynamic_forcing_and_swe.reset_index()
         orig_swe = orig_swe[["Date", "Station", "SWE"]].copy()
 
         all_dates = orig_swe["Date"].unique()
         unique_dates = pd.date_range(start=all_dates.min(), end=all_dates.max(), freq="D")
+        train_dates = [d for d in unique_dates if pd.Timestamp(d).year in self.train_years]
 
         dataset.dynamic_forcing_and_swe = dataset.dynamic_forcing_and_swe.reset_index()
 
-        stations = orig_swe["Station"].unique()  # not accessed. consider removing.
+        #stations = orig_swe["Station"].unique()  # not accessed. consider removing.
         MIN_COVERAGE = 95.0
         complete_stations = []
 
@@ -85,9 +98,8 @@ class SWEDataLoader:
 
             backtrans_cache[pd.Timestamp(dt).strftime("%Y-%m-%d")] = offsets
 
-            if (
-                pd.Timestamp(dt).year <= self.cfg.train_end_year
-            ):  # I think this assumes the train years are (i) contiguous and (ii) come chronologically before test and train. So, this is not super robust. Suggest using for dt in train_dates as done for validation below.
+        def apply_decorrelation_for_dates(dates_iterable):
+            for dt in dates_iterable:
                 time_mask = dataset.dynamic_forcing_and_swe["Date"] == dt
                 df_dt = dataset.dynamic_forcing_and_swe[time_mask].copy()
                 aligned = pd.DataFrame({"Station": station_order}).merge(df_dt, on="Station", how="left")
@@ -113,66 +125,17 @@ class SWEDataLoader:
                     transformed[["Station"] + cols_to_decor], on="Station", suffixes=("", "_decor"), how="left"
                 )
                 for col in cols_to_decor:
-                    dataset.dynamic_forcing_and_swe.loc[time_mask, col] = updated[f"{col}_decor"].values
-
+                    dataset.dynamic_forcing_and_swe.loc[time_mask, col] = updated[f"{col}_decor"].values         
+        
+        train_dates = [d for d in unique_dates if pd.Timestamp(d).year in self.train_years]
         val_dates = [d for d in unique_dates if pd.Timestamp(d).year in self.val_years]
-        for dt in val_dates:
-            time_mask = dataset.dynamic_forcing_and_swe["Date"] == dt
-            df_dt = dataset.dynamic_forcing_and_swe[time_mask].copy()
-            aligned = pd.DataFrame({"Station": station_order}).merge(df_dt, on="Station", how="left")
-
-            numeric_cols = aligned.select_dtypes(include=[np.number]).columns.tolist()
-            for col in numeric_cols:
-                if aligned[col].isna().any():
-                    aligned[col] = aligned[col].fillna(aligned[col].mean())
-
-            data_for_transform = aligned.copy()
-            cols_to_decor = ["SWE", "Tmax", "Tmin", "Precip", "Tobs", "TB_19", "TB_37", "TB_diff"]
-
-            transformed = fast_transform_with_weights(
-                trainData=data_for_transform,
-                target="SWE",
-                weights=weights,
-                cols_to_transform=cols_to_decor,
-                static_cols=None,
-                station_col="Station",
-            )
-
-            updated = dataset.dynamic_forcing_and_swe.loc[time_mask].merge(
-                transformed[["Station"] + cols_to_decor], on="Station", suffixes=("", "_decor"), how="left"
-            )
-            for col in cols_to_decor:
-                dataset.dynamic_forcing_and_swe.loc[time_mask, col] = updated[f"{col}_decor"].values
-
         test_dates = [d for d in unique_dates if pd.Timestamp(d).year in self.test_years]
-        # You have three blocks of code that are almost identical for dealing with train/test and val data. Suggest refactoring into one function that you call three times.
-        for dt in test_dates:
-            time_mask = dataset.dynamic_forcing_and_swe["Date"] == dt
-            df_dt = dataset.dynamic_forcing_and_swe[time_mask].copy()
-            aligned = pd.DataFrame({"Station": station_order}).merge(df_dt, on="Station", how="left")
 
-            numeric_cols = aligned.select_dtypes(include=[np.number]).columns.tolist()
-            for col in numeric_cols:
-                if aligned[col].isna().any():
-                    aligned[col] = aligned[col].fillna(aligned[col].mean())
+        apply_decorrelation_for_dates(train_dates)
+        apply_decorrelation_for_dates(val_dates)
+        apply_decorrelation_for_dates(test_dates)
 
-            data_for_transform = aligned.copy()
-            cols_to_decor = ["SWE", "Tmax", "Tmin", "Precip", "Tobs", "TB_19", "TB_37", "TB_diff"]
-
-            transformed = fast_transform_with_weights(
-                trainData=data_for_transform,
-                target="SWE",
-                weights=weights,
-                cols_to_transform=cols_to_decor,
-                static_cols=None,
-                station_col="Station",
-            )
-
-            updated = dataset.dynamic_forcing_and_swe.loc[time_mask].merge(
-                transformed[["Station"] + cols_to_decor], on="Station", suffixes=("", "_decor"), how="left"
-            )
-            for col in cols_to_decor:
-                dataset.dynamic_forcing_and_swe.loc[time_mask, col] = updated[f"{col}_decor"].values
+        #DONE: # You have three blocks of code that are almost identical for dealing with train/test and val data. Suggest refactoring into one function that you call three times.
 
         if getattr(self.cfg, "anomaly_target", False):
             df_all = dataset.dynamic_forcing_and_swe.copy()
@@ -201,9 +164,7 @@ class SWEDataLoader:
         )
 
         val_loader = DataLoader(val_dataset, batch_size=self.cfg.batch_size, collate_fn=self.collate_fn)
-
         test_loader = DataLoader(test_dataset, batch_size=self.cfg.batch_size, collate_fn=self.collate_fn)
-
         bt_info = {"weights": weights, "station_index": station_index, "backtrans_cache": backtrans_cache}
 
         return train_loader, val_loader, test_loader, SpatialTransformer(), bt_info
@@ -220,8 +181,6 @@ class SWEDataLoader:
 
         dynamic_pad = pad_sequence(dynamic, batch_first=True)
         swe_pad = pad_sequence(swe, batch_first=True)
-        if has_climo:
-            swe_clm_pad = pad_sequence(swe_clm, batch_first=True)
         lengths = torch.tensor([len(x) for x in dynamic])
         max_len = lengths.max()
         mask = torch.arange(max_len)[None, :] < lengths[:, None]
