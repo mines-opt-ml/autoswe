@@ -470,5 +470,4 @@ if __name__ == "__main__":
     with open("config.yaml", "r") as f:
         cfg_dict = yaml.safe_load(f)
     cfg = SimpleNamespace(**cfg_dict)
-    print(f"Training mode: {'ANOMALY' if getattr(cfg, 'anomaly_target', False) else 'DIRECT'}")
     model = train_model(cfg)
