@@ -18,7 +18,6 @@ from utils.metrics import masked_mse, masked_nse
 from dataset import SWEStationDataset
 from utils.snowyear_DOY_conversion import compute_day_of_snow_year
 
-# Seems like there is duplication between this function and the masked_mse/masked_nse functions above? Or perhaps I'm not understandin the role of the mask correctly?
 def compute_station_metrics(predictions_df: pd.DataFrame):
     """
     Compute NSE and RMSE per station. 
@@ -357,6 +356,9 @@ def train_model(cfg: SimpleNamespace):
     station_stats_dict = {}
     for station in station_mean_swe.index:
         station_stats_dict[station] = (float(station_mean_swe[station]), float(station_std_swe[station]))
+
+    sample0 = next(iter(train_loader))
+    cfg.input_size = sample0["dynamic forcing"].shape[-1]
 
     model = SWE_Net(cfg, station_stats=station_stats_dict).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=1e-4)

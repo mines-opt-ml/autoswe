@@ -102,28 +102,29 @@ class SWEStationDataset(Dataset):
     def build_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         Construct feature DataFrame from raw data.
+        Static station attributes are always included.
+        Meteorological forcings are controlled via cfg.dynamic_features.
         """
-        return pd.DataFrame(
-            {
-                "Elevation": df["Elevation_x"],
-                "Slope": df["Slope_tif1_x"],
-                "Aspect": df["Aspect_tif_x"],
-                "Latitude": df["Latitude_x"],
-                "Longitude": df["Longitude_x"],
-                "DayOfYear": df["Date"].apply(lambda d: compute_day_of_snow_year(d, self.beginning_of_snow_year)),
-                "Tmax": df["Tmax"],
-                "Tmin": df["Tmin"],
-                "Precip": df["Precip"],
-                "Tobs": df["Tobs"],
-                "TB_19": df["TB_19"],
-                "TB_37": df["TB_37"],
-                "TB_diff": df["TB_diff"],
-            }
+        dynamic_cols = getattr(
+            self.cfg,
+            "dynamic_features",
+            ["Tmax", "Tmin", "Precip", "Tobs", "TB_19", "TB_37", "TB_diff"],  
         )
 
-    # This function is never called, and the code is somewhat duplicated in __init__
-    # recommend removing the duplicated code in __init__ and using something like:
-    # self.lookup_table = self._create_lookup_table() - DONE
+        feat_dict = {
+            "Elevation": df["Elevation_x"],
+            "Slope": df["Slope_tif1_x"],
+            "Aspect": df["Aspect_tif_x"],
+            "Latitude": df["Latitude_x"],
+            "Longitude": df["Longitude_x"],
+            "DayOfYear": df["Date"].apply(lambda d: compute_day_of_snow_year(d, self.beginning_of_snow_year)),
+        }
+
+        for c in dynamic_cols:
+            feat_dict[c] = df[c]
+
+        return pd.DataFrame(feat_dict)
+
     def _create_lookup_table(self):
         lookup = []
         valid_stations = self.dynamic_forcing_and_swe["Station"].unique()
@@ -176,23 +177,7 @@ class SWEStationDataset(Dataset):
         if len(data) == 0:
             raise ValueError(f"No data found for station {station} between {start_date} and {end_of_snow_year_date}")
 
-        features = pd.DataFrame(
-            {
-                "Elevation": data["Elevation_x"],
-                "Slope": data["Slope_tif1_x"],
-                "Aspect": data["Aspect_tif_x"],
-                "Latitude": data["Latitude_x"],
-                "Longitude": data["Longitude_x"],
-                "DayOfYear": data["Date"].apply(lambda d: compute_day_of_snow_year(d, self.beginning_of_snow_year)),
-                "Tmax": data["Tmax"],
-                "Tmin": data["Tmin"],
-                "Precip": data["Precip"],
-                "Tobs": data["Tobs"],
-                "TB_19": data["TB_19"],
-                "TB_37": data["TB_37"],
-                "TB_diff": data["TB_diff"],
-            }
-        )
+        features = self.build_features(data)
 
         sample = {
             "dynamic forcing": torch.tensor(features.values, dtype=torch.float32),

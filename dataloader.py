@@ -1,5 +1,5 @@
 from typing import Dict, List, Tuple
-
+import sys
 import numpy as np
 import pandas as pd
 import torch
@@ -8,7 +8,6 @@ from torch.utils.data import DataLoader, Subset
 
 from dataset import SWEStationDataset
 from utils.SpatialTransform import SpatialTransformer, fast_transform_with_weights, precompute_weights
-
 
 class SWEDataLoader:
     def __init__(self, cfg, dataset = None):
@@ -33,8 +32,7 @@ class SWEDataLoader:
 
     def prepare(self) -> Tuple[DataLoader, DataLoader, DataLoader, SpatialTransformer, dict]:
         """
-        Create train,
-          validation, and test data loaders with spatial decorrelation.
+        Create train, validation, and test data loaders with spatial decorrelation.
         """
         dataset = self.dataset or SWEStationDataset(self.cfg)
 
@@ -47,7 +45,6 @@ class SWEDataLoader:
 
         dataset.dynamic_forcing_and_swe = dataset.dynamic_forcing_and_swe.reset_index()
 
-        #stations = orig_swe["Station"].unique()  # not accessed. consider removing.
         MIN_COVERAGE = 95.0
         complete_stations = []
 
@@ -110,13 +107,20 @@ class SWEDataLoader:
                         aligned[col] = aligned[col].fillna(aligned[col].mean())
 
                 data_for_transform = aligned.copy()
-                cols_to_decor = ["SWE", "Tmax", "Tmin", "Precip", "Tobs", "TB_19", "TB_37", "TB_diff"]
+                dynamic_cols = getattr(
+                    self.cfg,
+                    "dynamic_features",
+                    ["Tmax", "Tmin", "Precip", "Tobs", "TB_19", "TB_37", "TB_diff"],  
+                )
+                cols_to_decor = ["SWE"] + list(dynamic_cols)  
+
+                cols_to_transform = list(dynamic_cols)             
 
                 transformed = fast_transform_with_weights(
                     trainData=data_for_transform,
                     target="SWE",
                     weights=weights,
-                    cols_to_transform=cols_to_decor,
+                    cols_to_transform=cols_to_transform,
                     static_cols=None,
                     station_col="Station",
                 )
@@ -134,8 +138,6 @@ class SWEDataLoader:
         apply_decorrelation_for_dates(train_dates)
         apply_decorrelation_for_dates(val_dates)
         apply_decorrelation_for_dates(test_dates)
-
-        #DONE: # You have three blocks of code that are almost identical for dealing with train/test and val data. Suggest refactoring into one function that you call three times.
 
         if getattr(self.cfg, "anomaly_target", False):
             df_all = dataset.dynamic_forcing_and_swe.copy()
