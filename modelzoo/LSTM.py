@@ -17,10 +17,6 @@ class SWE_Net(nn.Module):
             lstm_input_size = self.input_size + self.station_context_size
         else:
             lstm_input_size = self.input_size
-
-        print(f"[DEBUG] LSTM __init__: cfg.input_size={cfg.input_size}, base_input_size={self.input_size}", flush=True)
-        print(f"[DEBUG] LSTM __init__: use_station_context={self.use_station_context}, lstm_input_size={lstm_input_size}", flush=True)
-        print(f"[DEBUG] LSTM imported from: {__file__}", flush=True)
         
         self.lstm = nn.LSTM(
             input_size=lstm_input_size,

@@ -123,6 +123,10 @@ class SWEStationDataset(Dataset):
         for c in dynamic_cols:
             feat_dict[c] = df[c]
 
+        lag = int(getattr(self.cfg, "lag_days", 0))
+        if lag > 0:
+            feat_dict[f"SWE_lag_{lag}"] = df["SWE"].shift(lag).fillna(0.0)
+
         return pd.DataFrame(feat_dict)
 
     def _create_lookup_table(self):

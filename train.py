@@ -16,7 +16,6 @@ from modelzoo.LSTM import SWE_Net
 from utils.backtransform import back_transform_scalar_with_weights
 from utils.metrics import masked_mse, masked_nse
 from dataset import SWEStationDataset
-from utils.snowyear_DOY_conversion import compute_day_of_snow_year
 
 def compute_station_metrics(predictions_df: pd.DataFrame):
     """
@@ -467,9 +466,14 @@ def train_model(cfg: SimpleNamespace):
     return model
 
 if __name__ == "__main__":
+    start_time = time.time()
     parser = argparse.ArgumentParser()
     args = parser.parse_args()
     with open("config.yaml", "r") as f:
         cfg_dict = yaml.safe_load(f)
     cfg = SimpleNamespace(**cfg_dict)
     model = train_model(cfg)
+    total_time = time.time() - start_time
+    print("\n" + "=" * 60)
+    print(f"Total Time: {total_time / 60:.2f} minutes")
+    print("=" * 60)
