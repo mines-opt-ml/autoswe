@@ -7,8 +7,8 @@ obs_temp_path: data/Temperature_observed_CONUS.csv
 tb19_path: data/TB_19_VE_CONUS.csv
 tb37_path: data/TB_37_VE_CONUS.csv
 tbdiff_path: data/TB_diff_37_19_VE_CONUS.csv
-dynamic_features: ["Tmax", "Tmin", "Precip", "Tobs"] #options: ["Tmax", "Tmin", "Precip", "Tobs", "TB_19", "TB_37", "TB_diff"]
-lag_days: 0
+dynamic_features: ["Tmax", "Tmin", "Precip", "Tobs", "TB_19", "TB_37", "TB_diff"] #options: ["Tmax", "Tmin", "Precip", "Tobs", "TB_19", "TB_37", "TB_diff"]
+lag_days: 30
 beginning_of_snow_year: "10-01"
 end_of_snow_year: "06-30"
 train_start_year: 2001
@@ -16,7 +16,7 @@ train_end_year: 2012
 val_start_year: 2013
 val_end_year: 2015
 test_start_year: 2016
-test_end_year: 2018
+test_end_year: 2019
 hidden_dims: [128, 64]
 hidden_size: 256
 num_layers: 4
@@ -28,11 +28,11 @@ range_param: 2.0
 nugget: 0.1
 M: 20
 ncores: 4
-device: cpu
+device: cuda:0
 shuffle: true
 save: true
 save_path: results/model.pt
 loss: [MSE] #options: MSE, NSE, or [MSE, NSE]
-loss_weights: [1.0] #if [MSE, NSE], insert desired [MSEweight, NSEweight] here
+loss_weights: [1.0] #if [MSE, NSE] loss, insert desired [MSEweight, NSEweight] here
 normalization: "zscore"   #options: zscore, minmax
 use_anomaly_target: false
