@@ -8,7 +8,7 @@ tb19_path: data/TB_19_VE_CONUS.csv
 tb37_path: data/TB_37_VE_CONUS.csv
 tbdiff_path: data/TB_diff_37_19_VE_CONUS.csv
 dynamic_features: ["Tmax", "Tmin", "Precip", "Tobs", "TB_19", "TB_37", "TB_diff"] #options: ["Tmax", "Tmin", "Precip", "Tobs", "TB_19", "TB_37", "TB_diff"]
-lag_days: 30
+lag_days: 0
 beginning_of_snow_year: "10-01"
 end_of_snow_year: "06-30"
 train_start_year: 2001
