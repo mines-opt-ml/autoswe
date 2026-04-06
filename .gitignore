@@ -200,3 +200,7 @@ cython_debug/
 *.pkl
 results/*.csv
 *.png
+*.err
+*.out
+*.sh
+tmp_cfg/*

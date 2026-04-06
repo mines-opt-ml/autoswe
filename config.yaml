@@ -27,7 +27,7 @@ smoothness: 1.0
 range_param: 2.0
 nugget: 0.1
 M: 20
-ncores: 4
+ncores: 1
 device: cuda:0
 shuffle: true
 save: true

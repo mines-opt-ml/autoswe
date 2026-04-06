@@ -325,6 +325,7 @@ def run_test(*, model: torch.nn.Module, test_loader, hist_mean_model,
     }
 
 def train_model(cfg: SimpleNamespace):
+    total_start_time = time.time() #comment out after sweeps!
     device = torch.device(cfg.device)
 
     dataset = SWEStationDataset(cfg)
@@ -448,7 +449,7 @@ def train_model(cfg: SimpleNamespace):
                 torch.save(best_model_state, "results/best_model.pt")
                 print(f"*** New best model saved (Epoch {best_epoch}, Val NSE = {best_val_nse:.4f}) ***")
 
-    _ = run_test(
+    test_results = run_test(
         model=model,
         test_loader=test_loader,
         hist_mean_model=hist_mean_model,
@@ -460,20 +461,63 @@ def train_model(cfg: SimpleNamespace):
         best_model_state=best_model_state,
         device=device,
         best_epoch=best_epoch,
-        cfg = cfg,
+        cfg=cfg,
     )
 
-    return model
+    total_time = time.time() - total_start_time
+    print(f"\nTotal Time: {total_time / 60:.2f} minutes")
+
+    return model, test_results, total_time
 
 if __name__ == "__main__":
-    start_time = time.time()
     parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, default="config.yaml",
+                        help="Path to YAML config file (default: config.yaml)")
     args = parser.parse_args()
-    with open("config.yaml", "r") as f:
+    with open(args.config, "r") as f:
         cfg_dict = yaml.safe_load(f)
     cfg = SimpleNamespace(**cfg_dict)
-    model = train_model(cfg)
-    total_time = time.time() - start_time
-    print("\n" + "=" * 60)
-    print(f"Total Time: {total_time / 60:.2f} minutes")
-    print("=" * 60)
+    model, test_results, total_time = train_model(cfg)
+# --------i d
+# Below is for sweeps of M
+# --------
+    import csv
+    from datetime import datetime
+    from filelock import FileLock
+
+    summary_dir = os.path.join(os.path.dirname(__file__), "results")
+    os.makedirs(summary_dir, exist_ok=True)
+
+    summary_path = os.path.join(summary_dir, "sweep_summary.csv")
+    lock = FileLock(summary_path + ".lock")
+
+    row = {
+        "timestamp": datetime.now().isoformat(),
+        "run_name": getattr(cfg, "run_name", None),
+        "M": getattr(cfg, "M", None),
+        "test_nse": test_results["test_nse"],
+        "test_rmse": test_results["test_rmse"],
+        "total_time_seconds": total_time,
+    }
+
+    with lock:
+        file_exists = os.path.exists(summary_path)
+        with open(summary_path, "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=row.keys())
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(row)
+
+#uncomment after mass runs!-----
+#if __name__ == "__main__":
+ #   start_time = time.time()
+  #  parser = argparse.ArgumentParser()
+   # args = parser.parse_args()
+    #with open("config.yaml", "r") as f:
+     #   cfg_dict = yaml.safe_load(f)
+    #cfg = SimpleNamespace(**cfg_dict)
+    #model = train_model(cfg)
+    #total_time = time.time() - start_time
+    #print("\n" + "=" * 60)
+    #print(f"Total Time: {total_time / 60:.2f} minutes")
+    #print("=" * 60)
