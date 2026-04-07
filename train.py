@@ -12,6 +12,7 @@ from sklearn.metrics import mean_squared_error
 
 from dataloader import SWEDataLoader
 from modelzoo.HistoricalMean import HistoricalMean
+from modelzoo.Persistence import Persistence
 from modelzoo.LSTM import SWE_Net
 from utils.backtransform import back_transform_scalar_with_weights
 from utils.metrics import masked_mse, masked_nse
@@ -68,7 +69,6 @@ def build_doy_climatology(obs_swe: pd.DataFrame, train_start: int, train_end: in
     """
     df = obs_swe.copy()
     df["Date"] = pd.to_datetime(df["Date"])
-    # The line below assumes the train years are contiguous. Consider changing to something like in(train_years) for robustness.
     train_years = list(range(train_start, train_end + 1))
     mask = df["Date"].dt.year.isin(train_years)
     #mask = (df["Date"].dt.year >= train_start) & (df["Date"].dt.year <= train_end)
@@ -78,7 +78,7 @@ def build_doy_climatology(obs_swe: pd.DataFrame, train_start: int, train_end: in
     station_mean = train_df.groupby("Station")["SWE"].mean()
     return climo, station_mean
 
-def run_validation(*, model: torch.nn.Module, val_loader, hist_mean_model,
+def run_validation(*, model: torch.nn.Module, val_loader, hist_mean_model, persistence_model,
     swe_normalizers: dict, backtrans_cache: dict, station_index: dict, weights,
     swe_lookup: pd.Series, cfg, avg_train_loss: float, epoch_start_time: float,
 ):
@@ -88,7 +88,10 @@ def run_validation(*, model: torch.nn.Module, val_loader, hist_mean_model,
     device = next(model.parameters()).device
     model.eval()
     val_preds, val_targets, epoch_predictions = [], [], []
-    val_baseline = []
+    neg_count = 0
+    total_count = 0
+    val_baseline_clim = []
+    val_baseline_persist = []
 
     with torch.no_grad():
         for batch in val_loader:
@@ -96,7 +99,11 @@ def run_validation(*, model: torch.nn.Module, val_loader, hist_mean_model,
             stations = batch["station"]
             dates = batch["dates"]
             preds = model(X, stations=stations)
-            preds_base_swe = hist_mean_model(X, stations=stations, dates=dates)
+            preds_base_clim = hist_mean_model(X, stations=stations, dates=dates)
+            preds_base_persist = (
+                persistence_model(X, stations=stations, dates=dates)
+                if persistence_model is not None else None
+            )
 
             if getattr(cfg, "anomaly_target", False):
                 if "swe_climo" not in batch:
@@ -126,10 +133,18 @@ def run_validation(*, model: torch.nn.Module, val_loader, hist_mean_model,
                         pred_value = swe_norm.inverse_transform(pd.DataFrame([[z_hat]], columns=["SWE"]))["SWE"].iloc[0]
                     else:
                         pred_value = z_hat
-                    pred_value = max(0.0, pred_value)
+                    if pred_value < 0:
+                        neg_count += 1
+                    total_count += 1
+                    #pred_value = max(0.0, pred_value)
                     actual_swe = swe_lookup.loc[(station, date_str)]
-                    base_val = max(0.0, float(preds_base_swe[i, t].item()))
-                    val_baseline.append(base_val)
+                    base_clim_val = max(0.0, float(preds_base_clim[i, t].item()))
+                    val_baseline_clim.append(base_clim_val)
+                    if preds_base_persist is not None:
+                        base_persist_val = max(0.0, float(preds_base_persist[i, t].item()))
+                        val_baseline_persist.append(base_persist_val)
+                    else:
+                        base_persist_val = np.nan
                     val_preds.append(pred_value)
                     val_targets.append(actual_swe)
                     epoch_predictions.append(
@@ -137,7 +152,8 @@ def run_validation(*, model: torch.nn.Module, val_loader, hist_mean_model,
                             "station": station,
                             "date": date_str,
                             "predicted_swe": pred_value,
-                            "baseline_swe": base_val,
+                            "baseline_swe": base_clim_val,
+                            "persistence_swe": base_persist_val,
                             "actual_swe": actual_swe,
                         }
                     )
@@ -151,14 +167,26 @@ def run_validation(*, model: torch.nn.Module, val_loader, hist_mean_model,
         nse = 1 - (ss_res / ss_tot) if ss_tot > 0 else np.nan
         epoch_time = time.time() - epoch_start_time
         print(f"Time: {epoch_time:.2f}s | Train Loss: {avg_train_loss:.4f} | Val RMSE: {rmse:.4f} | Val NSE: {nse:.4f}")
+        if total_count > 0:
+            neg_pct = 100.0 * neg_count / total_count
+            print(f"Negative predictions (pre-clipping): {neg_count}/{total_count} ({neg_pct:.2f}%)")
 
-        if val_baseline:
-            base_rmse = np.sqrt(mean_squared_error(val_targets, val_baseline))
-            base_ss_res = np.sum((np.array(val_targets) - np.array(val_baseline)) ** 2)
+        if val_baseline_clim:
+            base_rmse = np.sqrt(mean_squared_error(val_targets, val_baseline_clim))
+            base_ss_res = np.sum((np.array(val_targets) - np.array(val_baseline_clim)) ** 2)
             base_nse = 1 - (base_ss_res / ss_tot) if ss_tot > 0 else np.nan
             skill_rmse = 1.0 - (rmse / base_rmse) if base_rmse > 0 else np.nan
             print(
                 f"Baseline (Climatology) → RMSE: {base_rmse:.4f} | NSE: {base_nse:.4f} | RMSE Skill vs Clim: {skill_rmse:.4f}"
+            )
+
+        if val_baseline_persist:
+            persist_rmse = np.sqrt(mean_squared_error(val_targets, val_baseline_persist))
+            persist_ss_res = np.sum((np.array(val_targets) - np.array(val_baseline_persist)) ** 2)
+            persist_nse = 1 - (persist_ss_res / ss_tot) if ss_tot > 0 else np.nan
+            persist_skill = 1.0 - (rmse / persist_rmse) if persist_rmse > 0 else np.nan
+            print(
+                f"Baseline (Persistence) → RMSE: {persist_rmse:.4f} | NSE: {persist_nse:.4f} | RMSE Skill vs Persist: {persist_skill:.4f}"
             )
 
         station_metrics_df = compute_station_metrics(pd.DataFrame(epoch_predictions))
@@ -186,7 +214,7 @@ def run_validation(*, model: torch.nn.Module, val_loader, hist_mean_model,
 
     return metrics
 
-def run_test(*, model: torch.nn.Module, test_loader, hist_mean_model,
+def run_test(*, model: torch.nn.Module, test_loader, hist_mean_model, persistence_model,
     swe_normalizers: dict, backtrans_cache: dict, station_index: dict, weights, 
     swe_lookup: pd.Series, best_model_state, device: torch.device, best_epoch: int, cfg,
 ):
@@ -203,7 +231,10 @@ def run_test(*, model: torch.nn.Module, test_loader, hist_mean_model,
 
     print("\nRunning on TEST set...")
     test_preds, test_targets, test_predictions = [], [], []
-    test_baseline = []
+    neg_count = 0
+    total_count = 0
+    test_baseline_clim = []
+    test_baseline_persist = []
     model.eval()
 
     with torch.no_grad():
@@ -213,7 +244,11 @@ def run_test(*, model: torch.nn.Module, test_loader, hist_mean_model,
             stations = batch["station"]
             dates = batch["dates"]
             preds = model(X, stations=stations)
-            preds_base_swe = hist_mean_model(X, stations=stations, dates=dates)
+            preds_base_clim = hist_mean_model(X, stations=stations, dates=dates)
+            preds_base_persist = (
+                persistence_model(X, stations=stations, dates=dates)
+                if persistence_model is not None else None
+            )
 
             if getattr(cfg, "anomaly_target", False):
                 if "swe_climo" not in batch:
@@ -242,10 +277,18 @@ def run_test(*, model: torch.nn.Module, test_loader, hist_mean_model,
                         pred_value = swe_norm.inverse_transform(pd.DataFrame([[z_hat]], columns=["SWE"]))["SWE"].iloc[0]
                     else:
                         pred_value = z_hat
-                    pred_value = max(0.0, pred_value)
+                    if pred_value < 0:
+                        neg_count += 1
+                    total_count += 1
+                    #pred_value = max(0.0, pred_value)
                     actual_swe = swe_lookup.loc[(station, date_str)]
-                    base_val = max(0.0, float(preds_base_swe[i, t].item()))
-                    test_baseline.append(base_val)
+                    base_clim_val = max(0.0, float(preds_base_clim[i, t].item()))
+                    test_baseline_clim.append(base_clim_val)
+                    if preds_base_persist is not None:
+                        base_persist_val = max(0.0, float(preds_base_persist[i, t].item()))
+                        test_baseline_persist.append(base_persist_val)
+                    else:
+                        base_persist_val = np.nan
                     test_preds.append(pred_value)
                     test_targets.append(actual_swe)
                     test_predictions.append(
@@ -253,7 +296,8 @@ def run_test(*, model: torch.nn.Module, test_loader, hist_mean_model,
                             "station": station,
                             "date": date_str,
                             "predicted_swe": pred_value,
-                            "baseline_swe": base_val,
+                            "baseline_swe": base_clim_val,
+                            "persistence_swe": base_persist_val,
                             "actual_swe": actual_swe,
                         }
                     )
@@ -268,6 +312,9 @@ def run_test(*, model: torch.nn.Module, test_loader, hist_mean_model,
         print(f"TEST RMSE: {rmse:.4f}")
         print(f"TEST NSE : {nse:.4f}")
         print(f"TEST Predictions: {len(test_preds)}")
+        if total_count > 0:
+            neg_pct = 100.0 * neg_count / total_count
+            print(f"\nNegative predictions (pre-clipping): {neg_count}/{total_count} ({neg_pct:.2f}%)")
 
         station_metrics_df = compute_station_metrics(pd.DataFrame(test_predictions))
         valid_nse = station_metrics_df["nse"].dropna()
@@ -278,9 +325,9 @@ def run_test(*, model: torch.nn.Module, test_loader, hist_mean_model,
         print(f"0.5 < NSE ≤ 0.75 : {((valid_nse > 0.5) & (valid_nse <= 0.75)).sum():3d}")
         print(f"0.75 < NSE ≤ 1.0 : {((valid_nse > 0.75) & (valid_nse <= 1.0)).sum():3d}")
 
-        if test_baseline:
-            base_rmse = np.sqrt(mean_squared_error(test_targets, test_baseline))
-            base_ss_res = np.sum((np.array(test_targets) - np.array(test_baseline)) ** 2)
+        if test_baseline_clim:
+            base_rmse = np.sqrt(mean_squared_error(test_targets, test_baseline_clim))
+            base_ss_res = np.sum((np.array(test_targets) - np.array(test_baseline_clim)) ** 2)
             base_nse = 1 - (base_ss_res / ss_tot) if ss_tot > 0 else np.nan
             skill_rmse = 1.0 - (rmse / base_rmse) if base_rmse > 0 else np.nan
             print("\nBaseline (Climatology) on TEST")
@@ -294,12 +341,35 @@ def run_test(*, model: torch.nn.Module, test_loader, hist_mean_model,
                 )
             )
             valid_nse_base = baseline_metrics_df["nse"].dropna()
-            print("\nStation-level NSE distribution (TEST, Baseline):")
+            print("\nStation-level NSE distribution (TEST, Baseline / Climatology):")
             print(f"NSE ≤ 0          : {(valid_nse_base <= 0).sum():3d}")
             print(f"0 < NSE ≤ 0.3    : {((valid_nse_base > 0) & (valid_nse_base <= 0.3)).sum():3d}")
             print(f"0.3 < NSE ≤ 0.5  : {((valid_nse_base > 0.3) & (valid_nse_base <= 0.5)).sum():3d}")
             print(f"0.5 < NSE ≤ 0.75 : {((valid_nse_base > 0.5) & (valid_nse_base <= 0.75)).sum():3d}")
             print(f"0.75 < NSE ≤ 1.0 : {((valid_nse_base > 0.75) & (valid_nse_base <= 1.0)).sum():3d}")
+
+        if test_baseline_persist:
+            persist_rmse = np.sqrt(mean_squared_error(test_targets, test_baseline_persist))
+            persist_ss_res = np.sum((np.array(test_targets) - np.array(test_baseline_persist)) ** 2)
+            persist_nse = 1 - (persist_ss_res / ss_tot) if ss_tot > 0 else np.nan
+            persist_skill = 1.0 - (rmse / persist_rmse) if persist_rmse > 0 else np.nan
+            print("\nBaseline (Persistence) on TEST")
+            print(f"TEST Persistence RMSE: {persist_rmse:.4f}")
+            print(f"TEST Persistence NSE : {persist_nse:.4f}")
+            print(f"TEST RMSE Skill vs Persist: {persist_skill:.4f}")
+
+            persistence_metrics_df = compute_station_metrics(
+                pd.DataFrame(test_predictions)[["station", "persistence_swe", "actual_swe"]].rename(
+                    columns={"persistence_swe": "predicted_swe"}
+                )
+            )
+            valid_nse_persist = persistence_metrics_df["nse"].dropna()
+            print("\nStation-level NSE distribution (TEST, Baseline / Persistence):")
+            print(f"NSE ≤ 0          : {(valid_nse_persist <= 0).sum():3d}")
+            print(f"0 < NSE ≤ 0.3    : {((valid_nse_persist > 0) & (valid_nse_persist <= 0.3)).sum():3d}")
+            print(f"0.3 < NSE ≤ 0.5  : {((valid_nse_persist > 0.3) & (valid_nse_persist <= 0.5)).sum():3d}")
+            print(f"0.5 < NSE ≤ 0.75 : {((valid_nse_persist > 0.5) & (valid_nse_persist <= 0.75)).sum():3d}")
+            print(f"0.75 < NSE ≤ 1.0 : {((valid_nse_persist > 0.75) & (valid_nse_persist <= 1.0)).sum():3d}")
 
         output_dir = os.path.join(os.path.dirname(__file__), "results")
         os.makedirs(output_dir, exist_ok=True)
@@ -316,7 +386,15 @@ def run_test(*, model: torch.nn.Module, test_loader, hist_mean_model,
         print("Saved test station metrics to results/test_station_metrics.csv")
         print("Saved test predictions (+ baseline) to results/test_predictions_with_baseline.csv")
         print("Saved test station metrics (baseline) to results/test_station_metrics_baseline.csv")
-
+        if persistence_model is not None and test_baseline_persist:
+            persistence_df = preds_with_baseline[["station", "date", "persistence_swe", "actual_swe"]].rename(
+                columns={"persistence_swe": "predicted_swe"}
+            )
+            station_metrics_persistence = compute_station_metrics(persistence_df)[["station", "nse", "rmse", "n_predictions"]]
+            station_metrics_persistence.to_csv(os.path.join(output_dir, "test_station_metrics_persistence.csv"), index=False)
+            persistence_df.to_csv(os.path.join(output_dir, "test_predictions_persistence.csv"), index=False)
+            print("Saved test predictions (persistence) to results/test_predictions_persistence.csv")
+            print("Saved test station metrics (persistence) to results/test_station_metrics_persistence.csv")
     return {
         "test_rmse": float(rmse) if test_preds else None,
         "test_nse": float(nse) if test_preds else None,
@@ -363,8 +441,17 @@ def train_model(cfg: SimpleNamespace):
     model = SWE_Net(cfg, station_stats=station_stats_dict).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="max", patience=8, factor=0.7)
-    hist_mean_model = HistoricalMean(climo_lookup=climo.to_dict(), station_mean=station_mean.to_dict()).to(device)
+    hist_mean_model = HistoricalMean(
+        climo_lookup=climo.to_dict(),
+        station_mean=station_mean.to_dict()
+    ).to(device)
     hist_mean_model.eval()
+
+    if cfg.lag_days >= 1:
+        persistence_model = Persistence(lag_days=cfg.lag_days).to(device)
+        persistence_model.eval()
+    else:
+        persistence_model = None
 
     best_val_nse = float("-inf")
     best_epoch = -1
@@ -428,6 +515,7 @@ def train_model(cfg: SimpleNamespace):
             model=model,
             val_loader=val_loader,
             hist_mean_model=hist_mean_model,
+            persistence_model=persistence_model,
             swe_normalizers=swe_normalizers,
             backtrans_cache=backtrans_cache,
             station_index=station_index,
@@ -453,6 +541,7 @@ def train_model(cfg: SimpleNamespace):
         model=model,
         test_loader=test_loader,
         hist_mean_model=hist_mean_model,
+        persistence_model=persistence_model,
         swe_normalizers=swe_normalizers,
         backtrans_cache=backtrans_cache,
         station_index=station_index,
