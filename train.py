@@ -12,46 +12,68 @@ from sklearn.metrics import mean_squared_error
 
 from dataloader import SWEDataLoader
 from modelzoo.HistoricalMean import HistoricalMean
-from modelzoo.Persistence import Persistence
 from modelzoo.LSTM import SWE_Net
 from utils.backtransform import back_transform_scalar_with_weights
 from utils.metrics import masked_mse, masked_nse
 from dataset import SWEStationDataset
 
+
 def compute_station_metrics(predictions_df: pd.DataFrame):
     """
-    Compute NSE and RMSE per station. 
-    Expects: ['station','actual_swe','predicted_swe'].
+    Compute NSE and RMSE per station.
+    Expects columns: ['station', 'actual_swe', 'predicted_swe'].
     """
     station_metrics = []
     for station in predictions_df["station"].unique():
         station_data = predictions_df[predictions_df["station"] == station]
         actual = station_data["actual_swe"].values
         predicted = station_data["predicted_swe"].values
+
         mean_observed = np.mean(actual)
         ss_res = np.sum((actual - predicted) ** 2)
-        ss_tot = np.sum((np.array(actual) - mean_observed) ** 2)
+        ss_tot = np.sum((actual - mean_observed) ** 2)
         nse = 1 - (ss_res / ss_tot) if ss_tot > 0 else np.nan
         rmse = np.sqrt(mean_squared_error(actual, predicted))
-        station_metrics.append({"station": station, "nse": nse, "rmse": rmse, "n_predictions": len(actual)})
+
+        station_metrics.append(
+            {
+                "station": station,
+                "nse": nse,
+                "rmse": rmse,
+                "n_predictions": len(actual),
+            }
+        )
+
     return pd.DataFrame(station_metrics)
 
 
-def build_backtrans_cache_normalized_from_obs(obs_swe: pd.DataFrame, swe_normalizers: dict, station_index: dict, weights) -> dict:
-    """Build per-date offsets using normalized SWE so the Heaton back-transform returns normalized predictions."""
+def build_backtrans_cache_normalized_from_obs(
+    obs_swe: pd.DataFrame,
+    swe_normalizers: dict,
+    station_index: dict,
+    weights,
+) -> dict:
+    """
+    Build per-date offsets using normalized SWE so the Heaton back-transform
+    returns normalized predictions.
+    """
     df = obs_swe.copy()
     df["Date"] = pd.to_datetime(df["Date"])
     df["Station"] = df["Station"].str.lower()
+
     inv = {idx: st for st, idx in station_index.items()}
     station_order = [inv[i] for i in range(len(inv))]
+
     means = []
     stds = []
     for st in station_order:
         stats = swe_normalizers[st].stats["SWE"]
         means.append(float(stats["mean"]))
         stds.append(float(stats["std"]))
+
     means = np.array(means, dtype=np.float32)
     stds = np.array(stds, dtype=np.float32)
+
     cache = {}
     for dt in sorted(df["Date"].unique()):
         day = df[df["Date"] == dt].set_index("Station").reindex(station_order)
@@ -60,6 +82,7 @@ def build_backtrans_cache_normalized_from_obs(obs_swe: pd.DataFrame, swe_normali
         y_norm = np.nan_to_num(y_norm, nan=0.0)
         offsets = (weights.A * y_norm[weights.nn_index]).sum(axis=1).astype(np.float32)
         cache[pd.Timestamp(dt).strftime("%Y-%m-%d")] = offsets
+
     return cache
 
 
@@ -71,39 +94,86 @@ def build_doy_climatology(obs_swe: pd.DataFrame, train_start: int, train_end: in
     df["Date"] = pd.to_datetime(df["Date"])
     train_years = list(range(train_start, train_end + 1))
     mask = df["Date"].dt.year.isin(train_years)
-    #mask = (df["Date"].dt.year >= train_start) & (df["Date"].dt.year <= train_end)
     train_df = df.loc[mask].copy()
+
     train_df["DOY"] = train_df["Date"].dt.dayofyear
     climo = train_df.groupby(["Station", "DOY"])["SWE"].mean()
     station_mean = train_df.groupby("Station")["SWE"].mean()
+
     return climo, station_mean
 
-def run_validation(*, model: torch.nn.Module, val_loader, hist_mean_model, persistence_model,
-    swe_normalizers: dict, backtrans_cache: dict, station_index: dict, weights,
-    swe_lookup: pd.Series, cfg, avg_train_loss: float, epoch_start_time: float,
+
+def build_persistence_df(predictions_df: pd.DataFrame, fill_value: float = 0.0) -> pd.DataFrame:
+    """
+    Build a simple persistence baseline:
+        predicted_swe_t = actual_swe_(t-1)
+    computed within each station after sorting by date.
+    """
+    df = predictions_df[["station", "date", "actual_swe"]].copy()
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.sort_values(["station", "date"]).copy()
+
+    df["predicted_swe"] = df.groupby("station")["actual_swe"].shift(1)
+    df["predicted_swe"] = df["predicted_swe"].fillna(fill_value)
+
+    df["date"] = df["date"].dt.strftime("%Y-%m-%d")
+    return df[["station", "date", "predicted_swe", "actual_swe"]]
+
+
+def print_nse_distribution(metrics_df: pd.DataFrame, title: str):
+    valid_nse = metrics_df["nse"].dropna()
+    print(f"\n{title}")
+    print(f"NSE ≤ 0          : {(valid_nse <= 0).sum():3d}")
+    print(f"0 < NSE ≤ 0.3    : {((valid_nse > 0) & (valid_nse <= 0.3)).sum():3d}")
+    print(f"0.3 < NSE ≤ 0.5  : {((valid_nse > 0.3) & (valid_nse <= 0.5)).sum():3d}")
+    print(f"0.5 < NSE ≤ 0.75 : {((valid_nse > 0.5) & (valid_nse <= 0.75)).sum():3d}")
+    print(f"0.75 < NSE ≤ 1.0 : {((valid_nse > 0.75) & (valid_nse <= 1.0)).sum():3d}")
+
+
+def compute_global_metrics(actual, predicted):
+    actual = np.asarray(actual)
+    predicted = np.asarray(predicted)
+
+    rmse = np.sqrt(mean_squared_error(actual, predicted))
+    mean_observed = np.mean(actual)
+    ss_res = np.sum((actual - predicted) ** 2)
+    ss_tot = np.sum((actual - mean_observed) ** 2)
+    nse = 1 - (ss_res / ss_tot) if ss_tot > 0 else np.nan
+
+    return rmse, nse, ss_tot
+
+
+def run_validation(
+    *,
+    model: torch.nn.Module,
+    val_loader,
+    hist_mean_model,
+    swe_normalizers: dict,
+    backtrans_cache: dict,
+    station_index: dict,
+    weights,
+    swe_lookup: pd.Series,
+    cfg,
+    avg_train_loss: float,
+    epoch_start_time: float,
 ):
     """
     Standalone validation function.
     """
     device = next(model.parameters()).device
     model.eval()
+
     val_preds, val_targets, epoch_predictions = [], [], []
-    neg_count = 0
-    total_count = 0
     val_baseline_clim = []
-    val_baseline_persist = []
 
     with torch.no_grad():
         for batch in val_loader:
             X = batch["dynamic forcing"].to(device)
             stations = batch["station"]
             dates = batch["dates"]
+
             preds = model(X, stations=stations)
             preds_base_clim = hist_mean_model(X, stations=stations, dates=dates)
-            preds_base_persist = (
-                persistence_model(X, stations=stations, dates=dates)
-                if persistence_model is not None else None
-            )
 
             if getattr(cfg, "anomaly_target", False):
                 if "swe_climo" not in batch:
@@ -117,11 +187,14 @@ def run_validation(*, model: torch.nn.Module, val_loader, hist_mean_model, persi
                 station = stations[i]
                 valid_timesteps = int(mask[i].sum().item())
                 swe_norm = swe_normalizers.get(station, None)
+
                 for t in range(valid_timesteps):
                     date_str = pd.to_datetime(dates[i][t]).strftime("%Y-%m-%d")
                     if date_str not in backtrans_cache:
                         continue
+
                     pred_prime = (preds[i, t] + climo[i, t]).item() if climo is not None else preds[i, t].item()
+
                     z_hat = back_transform_scalar_with_weights(
                         pred_prime=pred_prime,
                         station_idx=station_index[station],
@@ -129,79 +202,61 @@ def run_validation(*, model: torch.nn.Module, val_loader, hist_mean_model, persi
                         weights=weights,
                         backtrans_cache=backtrans_cache,
                     )
+
                     if swe_norm is not None:
-                        pred_value = swe_norm.inverse_transform(pd.DataFrame([[z_hat]], columns=["SWE"]))["SWE"].iloc[0]
+                        pred_value = swe_norm.inverse_transform(
+                            pd.DataFrame([[z_hat]], columns=["SWE"])
+                        )["SWE"].iloc[0]
                     else:
                         pred_value = z_hat
-                    if pred_value < 0:
-                        neg_count += 1
-                    total_count += 1
-                    #pred_value = max(0.0, pred_value)
+
                     actual_swe = swe_lookup.loc[(station, date_str)]
                     base_clim_val = max(0.0, float(preds_base_clim[i, t].item()))
-                    val_baseline_clim.append(base_clim_val)
-                    if preds_base_persist is not None:
-                        base_persist_val = max(0.0, float(preds_base_persist[i, t].item()))
-                        val_baseline_persist.append(base_persist_val)
-                    else:
-                        base_persist_val = np.nan
+
                     val_preds.append(pred_value)
                     val_targets.append(actual_swe)
+                    val_baseline_clim.append(base_clim_val)
+
                     epoch_predictions.append(
                         {
                             "station": station,
                             "date": date_str,
                             "predicted_swe": pred_value,
                             "baseline_swe": base_clim_val,
-                            "persistence_swe": base_persist_val,
                             "actual_swe": actual_swe,
                         }
                     )
 
     metrics = {}
     if val_preds:
-        rmse = np.sqrt(mean_squared_error(val_targets, val_preds))
-        mean_observed = np.mean(val_targets)
-        ss_res = np.sum((np.array(val_targets) - np.array(val_preds)) ** 2)
-        ss_tot = np.sum((np.array(val_targets) - mean_observed) ** 2)
-        nse = 1 - (ss_res / ss_tot) if ss_tot > 0 else np.nan
+        rmse, nse, ss_tot = compute_global_metrics(val_targets, val_preds)
         epoch_time = time.time() - epoch_start_time
+
         print(f"Time: {epoch_time:.2f}s | Train Loss: {avg_train_loss:.4f} | Val RMSE: {rmse:.4f} | Val NSE: {nse:.4f}")
-        if total_count > 0:
-            neg_pct = 100.0 * neg_count / total_count
-            print(f"Negative predictions (pre-clipping): {neg_count}/{total_count} ({neg_pct:.2f}%)")
 
         if val_baseline_clim:
-            base_rmse = np.sqrt(mean_squared_error(val_targets, val_baseline_clim))
-            base_ss_res = np.sum((np.array(val_targets) - np.array(val_baseline_clim)) ** 2)
-            base_nse = 1 - (base_ss_res / ss_tot) if ss_tot > 0 else np.nan
+            base_rmse, base_nse, _ = compute_global_metrics(val_targets, val_baseline_clim)
             skill_rmse = 1.0 - (rmse / base_rmse) if base_rmse > 0 else np.nan
             print(
                 f"Baseline (Climatology) → RMSE: {base_rmse:.4f} | NSE: {base_nse:.4f} | RMSE Skill vs Clim: {skill_rmse:.4f}"
             )
 
-        if val_baseline_persist:
-            persist_rmse = np.sqrt(mean_squared_error(val_targets, val_baseline_persist))
-            persist_ss_res = np.sum((np.array(val_targets) - np.array(val_baseline_persist)) ** 2)
-            persist_nse = 1 - (persist_ss_res / ss_tot) if ss_tot > 0 else np.nan
-            persist_skill = 1.0 - (rmse / persist_rmse) if persist_rmse > 0 else np.nan
-            print(
-                f"Baseline (Persistence) → RMSE: {persist_rmse:.4f} | NSE: {persist_nse:.4f} | RMSE Skill vs Persist: {persist_skill:.4f}"
-            )
+        epoch_predictions_df = pd.DataFrame(epoch_predictions)
+        station_metrics_df = compute_station_metrics(epoch_predictions_df)
+        print_nse_distribution(station_metrics_df, "Epoch NSE Distribution (Model):")
 
-        station_metrics_df = compute_station_metrics(pd.DataFrame(epoch_predictions))
-        valid_nse = station_metrics_df["nse"].dropna()
-        nse_le_0 = (valid_nse <= 0).sum()
-        nse_0_to_3 = ((valid_nse > 0) & (valid_nse <= 0.3)).sum()
-        nse_3_to_5 = ((valid_nse > 0.3) & (valid_nse <= 0.5)).sum()
-        nse_5_to_75 = ((valid_nse > 0.5) & (valid_nse <= 0.75)).sum()
-        nse_75_to_1 = ((valid_nse > 0.75) & (valid_nse <= 1.0)).sum()
-        print("\nEpoch NSE Distribution (Model):")
-        print(f"NSE ≤ 0          : {nse_le_0:3d}")
-        print(f"0 < NSE ≤ 0.3    : {nse_0_to_3:3d}")
-        print(f"0.3 < NSE ≤ 0.5  : {nse_3_to_5:3d}")
-        print(f"0.5 < NSE ≤ 0.75 : {nse_5_to_75:3d}")
-        print(f"0.75 < NSE ≤ 1.0 : {nse_75_to_1:3d}")
+        persistence_df = build_persistence_df(epoch_predictions_df, fill_value=0.0)
+        persist_rmse, persist_nse, _ = compute_global_metrics(
+            persistence_df["actual_swe"].values,
+            persistence_df["predicted_swe"].values,
+        )
+        persist_skill = 1.0 - (rmse / persist_rmse) if persist_rmse > 0 else np.nan
+        print(
+            f"Baseline (Persistence) → RMSE: {persist_rmse:.4f} | NSE: {persist_nse:.4f} | RMSE Skill vs Persist: {persist_skill:.4f}"
+        )
+
+        persistence_metrics_df = compute_station_metrics(persistence_df)
+        print_nse_distribution(persistence_metrics_df, "Epoch NSE Distribution (Persistence):")
 
         metrics.update(
             {
@@ -214,9 +269,21 @@ def run_validation(*, model: torch.nn.Module, val_loader, hist_mean_model, persi
 
     return metrics
 
-def run_test(*, model: torch.nn.Module, test_loader, hist_mean_model, persistence_model,
-    swe_normalizers: dict, backtrans_cache: dict, station_index: dict, weights, 
-    swe_lookup: pd.Series, best_model_state, device: torch.device, best_epoch: int, cfg,
+
+def run_test(
+    *,
+    model: torch.nn.Module,
+    test_loader,
+    hist_mean_model,
+    swe_normalizers: dict,
+    backtrans_cache: dict,
+    station_index: dict,
+    weights,
+    swe_lookup: pd.Series,
+    best_model_state,
+    device: torch.device,
+    best_epoch: int,
+    cfg,
 ):
     """
     Standalone test function.
@@ -231,10 +298,8 @@ def run_test(*, model: torch.nn.Module, test_loader, hist_mean_model, persistenc
 
     print("\nRunning on TEST set...")
     test_preds, test_targets, test_predictions = [], [], []
-    neg_count = 0
-    total_count = 0
     test_baseline_clim = []
-    test_baseline_persist = []
+
     model.eval()
 
     with torch.no_grad():
@@ -243,12 +308,9 @@ def run_test(*, model: torch.nn.Module, test_loader, hist_mean_model, persistenc
             mask = batch["mask"]
             stations = batch["station"]
             dates = batch["dates"]
+
             preds = model(X, stations=stations)
             preds_base_clim = hist_mean_model(X, stations=stations, dates=dates)
-            preds_base_persist = (
-                persistence_model(X, stations=stations, dates=dates)
-                if persistence_model is not None else None
-            )
 
             if getattr(cfg, "anomaly_target", False):
                 if "swe_climo" not in batch:
@@ -261,11 +323,14 @@ def run_test(*, model: torch.nn.Module, test_loader, hist_mean_model, persistenc
                 station = stations[i]
                 valid_timesteps = int(mask[i].sum().item())
                 swe_norm = swe_normalizers.get(station, None)
+
                 for t in range(valid_timesteps):
                     date_str = pd.to_datetime(dates[i][t]).strftime("%Y-%m-%d")
                     if date_str not in backtrans_cache:
                         continue
+
                     pred_prime = (preds[i, t] + climo[i, t]).item() if climo is not None else preds[i, t].item()
+
                     z_hat = back_transform_scalar_with_weights(
                         pred_prime=pred_prime,
                         station_idx=station_index[station],
@@ -273,128 +338,125 @@ def run_test(*, model: torch.nn.Module, test_loader, hist_mean_model, persistenc
                         weights=weights,
                         backtrans_cache=backtrans_cache,
                     )
+
                     if swe_norm is not None:
-                        pred_value = swe_norm.inverse_transform(pd.DataFrame([[z_hat]], columns=["SWE"]))["SWE"].iloc[0]
+                        pred_value = swe_norm.inverse_transform(
+                            pd.DataFrame([[z_hat]], columns=["SWE"])
+                        )["SWE"].iloc[0]
                     else:
                         pred_value = z_hat
-                    if pred_value < 0:
-                        neg_count += 1
-                    total_count += 1
-                    #pred_value = max(0.0, pred_value)
+
                     actual_swe = swe_lookup.loc[(station, date_str)]
                     base_clim_val = max(0.0, float(preds_base_clim[i, t].item()))
-                    test_baseline_clim.append(base_clim_val)
-                    if preds_base_persist is not None:
-                        base_persist_val = max(0.0, float(preds_base_persist[i, t].item()))
-                        test_baseline_persist.append(base_persist_val)
-                    else:
-                        base_persist_val = np.nan
+
                     test_preds.append(pred_value)
                     test_targets.append(actual_swe)
+                    test_baseline_clim.append(base_clim_val)
+
                     test_predictions.append(
                         {
                             "station": station,
                             "date": date_str,
                             "predicted_swe": pred_value,
                             "baseline_swe": base_clim_val,
-                            "persistence_swe": base_persist_val,
                             "actual_swe": actual_swe,
                         }
                     )
 
     if test_preds:
-        rmse = np.sqrt(mean_squared_error(test_targets, test_preds))
-        mean_observed = np.mean(test_targets)
-        ss_res = np.sum((np.array(test_targets) - np.array(test_preds)) ** 2)
-        ss_tot = np.sum((np.array(test_targets) - mean_observed) ** 2)
-        nse = 1 - (ss_res / ss_tot) if ss_tot > 0 else np.nan
+        rmse, nse, _ = compute_global_metrics(test_targets, test_preds)
+
         print(f"\nTEST Results (Best Epoch {best_epoch})")
         print(f"TEST RMSE: {rmse:.4f}")
         print(f"TEST NSE : {nse:.4f}")
         print(f"TEST Predictions: {len(test_preds)}")
-        if total_count > 0:
-            neg_pct = 100.0 * neg_count / total_count
-            print(f"\nNegative predictions (pre-clipping): {neg_count}/{total_count} ({neg_pct:.2f}%)")
 
-        station_metrics_df = compute_station_metrics(pd.DataFrame(test_predictions))
-        valid_nse = station_metrics_df["nse"].dropna()
-        print("\nStation-level NSE distribution (TEST, Model):")
-        print(f"NSE ≤ 0          : {(valid_nse <= 0).sum():3d}")
-        print(f"0 < NSE ≤ 0.3    : {((valid_nse > 0) & (valid_nse <= 0.3)).sum():3d}")
-        print(f"0.3 < NSE ≤ 0.5  : {((valid_nse > 0.3) & (valid_nse <= 0.5)).sum():3d}")
-        print(f"0.5 < NSE ≤ 0.75 : {((valid_nse > 0.5) & (valid_nse <= 0.75)).sum():3d}")
-        print(f"0.75 < NSE ≤ 1.0 : {((valid_nse > 0.75) & (valid_nse <= 1.0)).sum():3d}")
+        test_predictions_df = pd.DataFrame(test_predictions)
+        station_metrics_df = compute_station_metrics(test_predictions_df)
+        print_nse_distribution(station_metrics_df, "Station-level NSE distribution (TEST, Model):")
 
         if test_baseline_clim:
-            base_rmse = np.sqrt(mean_squared_error(test_targets, test_baseline_clim))
-            base_ss_res = np.sum((np.array(test_targets) - np.array(test_baseline_clim)) ** 2)
-            base_nse = 1 - (base_ss_res / ss_tot) if ss_tot > 0 else np.nan
+            base_rmse, base_nse, _ = compute_global_metrics(test_targets, test_baseline_clim)
             skill_rmse = 1.0 - (rmse / base_rmse) if base_rmse > 0 else np.nan
+
             print("\nBaseline (Climatology) on TEST")
             print(f"TEST Baseline RMSE: {base_rmse:.4f}")
             print(f"TEST Baseline NSE : {base_nse:.4f}")
             print(f"TEST RMSE Skill vs Clim: {skill_rmse:.4f}")
 
-            baseline_metrics_df = compute_station_metrics(
-                pd.DataFrame(test_predictions)[["station", "baseline_swe", "actual_swe"]].rename(
-                    columns={"baseline_swe": "predicted_swe"}
-                )
+            baseline_df = test_predictions_df[["station", "date", "baseline_swe", "actual_swe"]].rename(
+                columns={"baseline_swe": "predicted_swe"}
             )
-            valid_nse_base = baseline_metrics_df["nse"].dropna()
-            print("\nStation-level NSE distribution (TEST, Baseline / Climatology):")
-            print(f"NSE ≤ 0          : {(valid_nse_base <= 0).sum():3d}")
-            print(f"0 < NSE ≤ 0.3    : {((valid_nse_base > 0) & (valid_nse_base <= 0.3)).sum():3d}")
-            print(f"0.3 < NSE ≤ 0.5  : {((valid_nse_base > 0.3) & (valid_nse_base <= 0.5)).sum():3d}")
-            print(f"0.5 < NSE ≤ 0.75 : {((valid_nse_base > 0.5) & (valid_nse_base <= 0.75)).sum():3d}")
-            print(f"0.75 < NSE ≤ 1.0 : {((valid_nse_base > 0.75) & (valid_nse_base <= 1.0)).sum():3d}")
-
-        if test_baseline_persist:
-            persist_rmse = np.sqrt(mean_squared_error(test_targets, test_baseline_persist))
-            persist_ss_res = np.sum((np.array(test_targets) - np.array(test_baseline_persist)) ** 2)
-            persist_nse = 1 - (persist_ss_res / ss_tot) if ss_tot > 0 else np.nan
-            persist_skill = 1.0 - (rmse / persist_rmse) if persist_rmse > 0 else np.nan
-            print("\nBaseline (Persistence) on TEST")
-            print(f"TEST Persistence RMSE: {persist_rmse:.4f}")
-            print(f"TEST Persistence NSE : {persist_nse:.4f}")
-            print(f"TEST RMSE Skill vs Persist: {persist_skill:.4f}")
-
-            persistence_metrics_df = compute_station_metrics(
-                pd.DataFrame(test_predictions)[["station", "persistence_swe", "actual_swe"]].rename(
-                    columns={"persistence_swe": "predicted_swe"}
-                )
+            baseline_metrics_df = compute_station_metrics(baseline_df)
+            print_nse_distribution(
+                baseline_metrics_df,
+                "Station-level NSE distribution (TEST, Baseline / Climatology):",
             )
-            valid_nse_persist = persistence_metrics_df["nse"].dropna()
-            print("\nStation-level NSE distribution (TEST, Baseline / Persistence):")
-            print(f"NSE ≤ 0          : {(valid_nse_persist <= 0).sum():3d}")
-            print(f"0 < NSE ≤ 0.3    : {((valid_nse_persist > 0) & (valid_nse_persist <= 0.3)).sum():3d}")
-            print(f"0.3 < NSE ≤ 0.5  : {((valid_nse_persist > 0.3) & (valid_nse_persist <= 0.5)).sum():3d}")
-            print(f"0.5 < NSE ≤ 0.75 : {((valid_nse_persist > 0.5) & (valid_nse_persist <= 0.75)).sum():3d}")
-            print(f"0.75 < NSE ≤ 1.0 : {((valid_nse_persist > 0.75) & (valid_nse_persist <= 1.0)).sum():3d}")
+
+        persistence_df = build_persistence_df(test_predictions_df, fill_value=0.0)
+        persist_rmse, persist_nse, _ = compute_global_metrics(
+            persistence_df["actual_swe"].values,
+            persistence_df["predicted_swe"].values,
+        )
+        persist_skill = 1.0 - (rmse / persist_rmse) if persist_rmse > 0 else np.nan
+
+        print("\nBaseline (Persistence) on TEST")
+        print(f"TEST Persistence RMSE: {persist_rmse:.4f}")
+        print(f"TEST Persistence NSE : {persist_nse:.4f}")
+        print(f"TEST RMSE Skill vs Persist: {persist_skill:.4f}")
+
+        persistence_metrics_df = compute_station_metrics(persistence_df)
+        print_nse_distribution(
+            persistence_metrics_df,
+            "Station-level NSE distribution (TEST, Baseline / Persistence):",
+        )
 
         output_dir = os.path.join(os.path.dirname(__file__), "results")
         os.makedirs(output_dir, exist_ok=True)
-        pd.DataFrame(test_predictions).to_csv(os.path.join(output_dir, "test_predictions.csv"), index=False)
+
+        test_predictions_df.to_csv(os.path.join(output_dir, "test_predictions.csv"), index=False)
         station_metrics_df.to_csv(os.path.join(output_dir, "test_station_metrics.csv"), index=False)
-        preds_with_baseline = pd.DataFrame(test_predictions)
-        preds_with_baseline.to_csv(os.path.join(output_dir, "test_predictions_with_baseline.csv"), index=False)
+
+        preds_with_baseline = test_predictions_df.copy()
+        preds_with_baseline = preds_with_baseline.merge(
+            persistence_df[["station", "date", "predicted_swe"]].rename(
+                columns={"predicted_swe": "persistence_swe"}
+            ),
+            on=["station", "date"],
+            how="left",
+        )
+        preds_with_baseline.to_csv(
+            os.path.join(output_dir, "test_predictions_with_baseline.csv"),
+            index=False,
+        )
+
         baseline_df = preds_with_baseline[["station", "date", "baseline_swe", "actual_swe"]].rename(
             columns={"baseline_swe": "predicted_swe"}
         )
-        station_metrics_baseline = compute_station_metrics(baseline_df)[["station", "nse", "rmse", "n_predictions"]]
-        station_metrics_baseline.to_csv(os.path.join(output_dir, "test_station_metrics_baseline.csv"), index=False)
+        station_metrics_baseline = compute_station_metrics(
+            baseline_df
+        )[["station", "nse", "rmse", "n_predictions"]]
+        station_metrics_baseline.to_csv(
+            os.path.join(output_dir, "test_station_metrics_baseline.csv"),
+            index=False,
+        )
+
+        persistence_df.to_csv(
+            os.path.join(output_dir, "test_predictions_persistence.csv"),
+            index=False,
+        )
+        persistence_metrics_df[["station", "nse", "rmse", "n_predictions"]].to_csv(
+            os.path.join(output_dir, "test_station_metrics_persistence.csv"),
+            index=False,
+        )
+
         print("Saved test predictions to results/test_predictions.csv")
         print("Saved test station metrics to results/test_station_metrics.csv")
         print("Saved test predictions (+ baseline) to results/test_predictions_with_baseline.csv")
         print("Saved test station metrics (baseline) to results/test_station_metrics_baseline.csv")
-        if persistence_model is not None and test_baseline_persist:
-            persistence_df = preds_with_baseline[["station", "date", "persistence_swe", "actual_swe"]].rename(
-                columns={"persistence_swe": "predicted_swe"}
-            )
-            station_metrics_persistence = compute_station_metrics(persistence_df)[["station", "nse", "rmse", "n_predictions"]]
-            station_metrics_persistence.to_csv(os.path.join(output_dir, "test_station_metrics_persistence.csv"), index=False)
-            persistence_df.to_csv(os.path.join(output_dir, "test_predictions_persistence.csv"), index=False)
-            print("Saved test predictions (persistence) to results/test_predictions_persistence.csv")
-            print("Saved test station metrics (persistence) to results/test_station_metrics_persistence.csv")
+        print("Saved test predictions (persistence) to results/test_predictions_persistence.csv")
+        print("Saved test station metrics (persistence) to results/test_station_metrics_persistence.csv")
+
     return {
         "test_rmse": float(rmse) if test_preds else None,
         "test_nse": float(nse) if test_preds else None,
@@ -402,8 +464,9 @@ def run_test(*, model: torch.nn.Module, test_loader, hist_mean_model, persistenc
         "best_epoch": int(best_epoch),
     }
 
+
 def train_model(cfg: SimpleNamespace):
-    total_start_time = time.time() #comment out after sweeps!
+    total_start_time = time.time()
     device = torch.device(cfg.device)
 
     dataset = SWEStationDataset(cfg)
@@ -413,7 +476,9 @@ def train_model(cfg: SimpleNamespace):
     swe_normalizers = dataset.swe_normalizers
 
     climo, station_mean = build_doy_climatology(
-        obs_swe=dataset.obs_swe, train_start=cfg.train_start_year, train_end=cfg.train_end_year
+        obs_swe=dataset.obs_swe,
+        train_start=cfg.train_start_year,
+        train_end=cfg.train_end_year,
     )
 
     dataloader = SWEDataLoader(cfg)
@@ -422,36 +487,41 @@ def train_model(cfg: SimpleNamespace):
     weights = bt_info["weights"]
 
     backtrans_cache = build_backtrans_cache_normalized_from_obs(
-        obs_swe=dataset.obs_swe, swe_normalizers=swe_normalizers, station_index=station_index, weights=weights
+        obs_swe=dataset.obs_swe,
+        swe_normalizers=swe_normalizers,
+        station_index=station_index,
+        weights=weights,
     )
 
     target_swe = dataset.obs_swe.copy()
     target_swe["Date"] = pd.to_datetime(target_swe["Date"])
     m = (target_swe["Date"].dt.year >= cfg.train_start_year) & (target_swe["Date"].dt.year <= cfg.train_end_year)
     tr = target_swe.loc[m]
+
     station_mean_swe = tr.groupby("Station")["SWE"].mean()
     station_std_swe = tr.groupby("Station")["SWE"].std()
+
     station_stats_dict = {}
     for station in station_mean_swe.index:
-        station_stats_dict[station] = (float(station_mean_swe[station]), float(station_std_swe[station]))
+        station_stats_dict[station] = (
+            float(station_mean_swe[station]),
+            float(station_std_swe[station]),
+        )
 
     sample0 = next(iter(train_loader))
     cfg.input_size = sample0["dynamic forcing"].shape[-1]
 
     model = SWE_Net(cfg, station_stats=station_stats_dict).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="max", patience=8, factor=0.7)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="max", patience=8, factor=0.7
+    )
+
     hist_mean_model = HistoricalMean(
         climo_lookup=climo.to_dict(),
-        station_mean=station_mean.to_dict()
+        station_mean=station_mean.to_dict(),
     ).to(device)
     hist_mean_model.eval()
-
-    if cfg.lag_days >= 1:
-        persistence_model = Persistence(lag_days=cfg.lag_days).to(device)
-        persistence_model.eval()
-    else:
-        persistence_model = None
 
     best_val_nse = float("-inf")
     best_epoch = -1
@@ -464,8 +534,10 @@ def train_model(cfg: SimpleNamespace):
 
         model.train()
         train_loss = 0.0
+
         for batch in train_loader:
             optimizer.zero_grad()
+
             X = batch["dynamic forcing"].to(device)
             y = batch["swe"].to(device)
             stations = batch["station"]
@@ -484,9 +556,9 @@ def train_model(cfg: SimpleNamespace):
 
             if isinstance(cfg.loss, str):
                 if cfg.loss.upper() == "MSE":
-                    loss = masked_mse(outputs, y, mask)
+                    loss = masked_mse(outputs, y_target, mask)
                 elif cfg.loss.upper() == "NSE":
-                    loss = masked_nse(outputs, y, mask)
+                    loss = masked_nse(outputs, y_target, mask)
                 else:
                     raise ValueError(f"Unknown loss: {cfg.loss}")
             elif isinstance(cfg.loss, (list, tuple)):
@@ -495,9 +567,9 @@ def train_model(cfg: SimpleNamespace):
                 for w, name in zip(weights_, cfg.loss):
                     name = name.upper()
                     if name == "MSE":
-                        terms.append(w * masked_mse(outputs, y, mask))
+                        terms.append(w * masked_mse(outputs, y_target, mask))
                     elif name == "NSE":
-                        terms.append(w * masked_nse(outputs, y, mask))
+                        terms.append(w * masked_nse(outputs, y_target, mask))
                     else:
                         raise ValueError(f"Unknown loss: {name}")
                 loss = sum(terms)
@@ -515,7 +587,6 @@ def train_model(cfg: SimpleNamespace):
             model=model,
             val_loader=val_loader,
             hist_mean_model=hist_mean_model,
-            persistence_model=persistence_model,
             swe_normalizers=swe_normalizers,
             backtrans_cache=backtrans_cache,
             station_index=station_index,
@@ -529,6 +600,7 @@ def train_model(cfg: SimpleNamespace):
         if metrics:
             nse = metrics["val_nse"]
             scheduler.step(nse)
+
             if nse > best_val_nse:
                 best_val_nse = nse
                 best_epoch = epoch + 1
@@ -541,7 +613,6 @@ def train_model(cfg: SimpleNamespace):
         model=model,
         test_loader=test_loader,
         hist_mean_model=hist_mean_model,
-        persistence_model=persistence_model,
         swe_normalizers=swe_normalizers,
         backtrans_cache=backtrans_cache,
         station_index=station_index,
@@ -558,18 +629,23 @@ def train_model(cfg: SimpleNamespace):
 
     return model, test_results, total_time
 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="config.yaml",
-                        help="Path to YAML config file (default: config.yaml)")
+    parser.add_argument(
+        "--config",
+        type=str,
+        default="config.yaml",
+        help="Path to YAML config file (default: config.yaml)",
+    )
     args = parser.parse_args()
+
     with open(args.config, "r") as f:
         cfg_dict = yaml.safe_load(f)
+
     cfg = SimpleNamespace(**cfg_dict)
     model, test_results, total_time = train_model(cfg)
-# --------i d
-# Below is for sweeps of M
-# --------
+
     import csv
     from datetime import datetime
     from filelock import FileLock
@@ -596,17 +672,3 @@ if __name__ == "__main__":
             if not file_exists:
                 writer.writeheader()
             writer.writerow(row)
-
-#uncomment after mass runs!-----
-#if __name__ == "__main__":
- #   start_time = time.time()
-  #  parser = argparse.ArgumentParser()
-   # args = parser.parse_args()
-    #with open("config.yaml", "r") as f:
-     #   cfg_dict = yaml.safe_load(f)
-    #cfg = SimpleNamespace(**cfg_dict)
-    #model = train_model(cfg)
-    #total_time = time.time() - start_time
-    #print("\n" + "=" * 60)
-    #print(f"Total Time: {total_time / 60:.2f} minutes")
-    #print("=" * 60)

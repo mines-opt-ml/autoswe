@@ -8,7 +8,7 @@ tb19_path: data/TB_19_VE_CONUS.csv
 tb37_path: data/TB_37_VE_CONUS.csv
 tbdiff_path: data/TB_diff_37_19_VE_CONUS.csv
 dynamic_features: ["Tmax", "Tmin", "Precip", "Tobs", "TB_19", "TB_37", "TB_diff"] #options: ["Tmax", "Tmin", "Precip", "Tobs", "TB_19", "TB_37", "TB_diff"]
-lag_days: 0
+lag_days: 0 #Must be >=1 to include at least one day of lagged features and persistence baseline. 
 beginning_of_snow_year: "10-01"
 end_of_snow_year: "06-30"
 train_start_year: 2001
@@ -22,11 +22,11 @@ hidden_size: 256
 num_layers: 4
 batch_size: 512
 lr: 0.001
-n_epochs: 10
+n_epochs: 1
 smoothness: 1.0
 range_param: 2.0
 nugget: 0.1
-M: 20
+M: 10
 ncores: 1
 device: cuda:0
 shuffle: true
