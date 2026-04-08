@@ -255,9 +255,6 @@ def run_validation(
             f"Baseline (Persistence) → RMSE: {persist_rmse:.4f} | NSE: {persist_nse:.4f} | RMSE Skill vs Persist: {persist_skill:.4f}"
         )
 
-        persistence_metrics_df = compute_station_metrics(persistence_df)
-        print_nse_distribution(persistence_metrics_df, "Epoch NSE Distribution (Persistence):")
-
         metrics.update(
             {
                 "val_rmse": float(rmse),
