@@ -204,3 +204,4 @@ results/*.csv
 *.out
 *.sh
 tmp_cfg/*
+*.json
