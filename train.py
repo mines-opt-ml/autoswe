@@ -1,5 +1,6 @@
 import argparse
 import os
+import random
 import time
 from types import SimpleNamespace
 from typing import Tuple
@@ -16,6 +17,17 @@ from modelzoo.LSTM import SWE_Net
 from utils.backtransform import back_transform_scalar_with_weights
 from utils.metrics import masked_mse, masked_nse
 from dataset import SWEStationDataset
+
+
+def set_seed(seed: int, deterministic: bool = False):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+    if deterministic:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
 
 def compute_station_metrics(predictions_df: pd.DataFrame):
@@ -463,6 +475,9 @@ def run_test(
 
 
 def train_model(cfg: SimpleNamespace):
+    if hasattr(cfg, "seed"):
+        set_seed(cfg.seed, getattr(cfg, "deterministic", False))
+
     total_start_time = time.time()
     device = torch.device(cfg.device)
 

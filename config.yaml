@@ -30,6 +30,8 @@ M: 10
 ncores: 1
 device: cuda:0
 shuffle: true
+seed: 42
+deterministic: true
 save: true
 save_path: results/model.pt
 loss: [MSE] #options: MSE, NSE, or [MSE, NSE]

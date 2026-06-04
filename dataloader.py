@@ -161,8 +161,17 @@ class SWEDataLoader:
         val_dataset = Subset(dataset, val_indices)
         test_dataset = Subset(dataset, test_indices)
 
+        generator = None
+        if hasattr(self.cfg, "seed"):
+            generator = torch.Generator()
+            generator.manual_seed(self.cfg.seed)
+
         train_loader = DataLoader(
-            train_dataset, batch_size=self.cfg.batch_size, shuffle=self.cfg.shuffle, collate_fn=self.collate_fn
+            train_dataset,
+            batch_size=self.cfg.batch_size,
+            shuffle=self.cfg.shuffle,
+            collate_fn=self.collate_fn,
+            generator=generator,
         )
 
         val_loader = DataLoader(val_dataset, batch_size=self.cfg.batch_size, collate_fn=self.collate_fn)
