@@ -155,10 +155,10 @@ def compute_global_metrics(actual, predicted):
     return rmse, nse, ss_tot
 
 
-def run_validation(
+def collect_predictions(
     *,
     model: torch.nn.Module,
-    val_loader,
+    loader,
     hist_mean_model,
     swe_normalizers: dict,
     backtrans_cache: dict,
@@ -166,21 +166,19 @@ def run_validation(
     weights,
     swe_lookup: pd.Series,
     cfg,
-    avg_train_loss: float,
-    epoch_start_time: float,
 ):
     """
-    Standalone validation function.
+    Run a loader and return row-level predictions on the original SWE scale.
     """
     device = next(model.parameters()).device
     model.eval()
 
-    val_preds, val_targets, epoch_predictions = [], [], []
-    val_baseline_clim = []
+    predictions = []
 
     with torch.no_grad():
-        for batch in val_loader:
+        for batch in loader:
             X = batch["dynamic forcing"].to(device)
+            mask = batch["mask"]
             stations = batch["station"]
             dates = batch["dates"]
 
@@ -194,7 +192,6 @@ def run_validation(
             else:
                 climo = None
 
-            mask = batch["mask"]
             for i in range(len(stations)):
                 station = stations[i]
                 valid_timesteps = int(mask[i].sum().item())
@@ -225,11 +222,7 @@ def run_validation(
                     actual_swe = swe_lookup.loc[(station, date_str)]
                     base_clim_val = max(0.0, float(preds_base_clim[i, t].item()))
 
-                    val_preds.append(pred_value)
-                    val_targets.append(actual_swe)
-                    val_baseline_clim.append(base_clim_val)
-
-                    epoch_predictions.append(
+                    predictions.append(
                         {
                             "station": station,
                             "date": date_str,
@@ -239,21 +232,89 @@ def run_validation(
                         }
                     )
 
+    return pd.DataFrame(predictions)
+
+
+def conformal_quantile(calibration_df: pd.DataFrame, alpha: float) -> float:
+    """
+    Split-conformal quantile for absolute residual intervals.
+    """
+    if calibration_df.empty:
+        raise ValueError("Cannot compute conformal quantile from an empty calibration set.")
+    if not 0.0 < alpha < 1.0:
+        raise ValueError(f"conformal_alpha must be between 0 and 1, got {alpha}.")
+
+    residuals = np.abs(
+        calibration_df["actual_swe"].to_numpy(dtype=float)
+        - calibration_df["predicted_swe"].to_numpy(dtype=float)
+    )
+    n = len(residuals)
+    q_level = min(1.0, np.ceil((n + 1) * (1.0 - alpha)) / n)
+    return float(np.quantile(residuals, q_level, method="higher"))
+
+
+def add_conformal_intervals(predictions_df: pd.DataFrame, q_hat: float) -> pd.DataFrame:
+    """
+    Attach nonnegative lower and upper split-conformal SWE intervals.
+    """
+    df = predictions_df.copy()
+    df["conformal_lower_swe"] = np.maximum(0.0, df["predicted_swe"] - q_hat)
+    df["conformal_upper_swe"] = df["predicted_swe"] + q_hat
+    covered = (
+        (df["actual_swe"] >= df["conformal_lower_swe"])
+        & (df["actual_swe"] <= df["conformal_upper_swe"])
+    )
+    df["conformal_covered"] = covered
+    return df
+
+
+def run_validation(
+    *,
+    model: torch.nn.Module,
+    val_loader,
+    hist_mean_model,
+    swe_normalizers: dict,
+    backtrans_cache: dict,
+    station_index: dict,
+    weights,
+    swe_lookup: pd.Series,
+    cfg,
+    avg_train_loss: float,
+    epoch_start_time: float,
+):
+    """
+    Standalone validation function.
+    """
+    epoch_predictions_df = collect_predictions(
+        model=model,
+        loader=val_loader,
+        hist_mean_model=hist_mean_model,
+        swe_normalizers=swe_normalizers,
+        backtrans_cache=backtrans_cache,
+        station_index=station_index,
+        weights=weights,
+        swe_lookup=swe_lookup,
+        cfg=cfg,
+    )
+
     metrics = {}
-    if val_preds:
+    if not epoch_predictions_df.empty:
+        val_preds = epoch_predictions_df["predicted_swe"].values
+        val_targets = epoch_predictions_df["actual_swe"].values
+        val_baseline_clim = epoch_predictions_df["baseline_swe"].values
+
         rmse, nse, ss_tot = compute_global_metrics(val_targets, val_preds)
         epoch_time = time.time() - epoch_start_time
 
         print(f"Time: {epoch_time:.2f}s | Train Loss: {avg_train_loss:.4f} | Val RMSE: {rmse:.4f} | Val NSE: {nse:.4f}")
 
-        if val_baseline_clim:
+        if len(val_baseline_clim) > 0:
             base_rmse, base_nse, _ = compute_global_metrics(val_targets, val_baseline_clim)
             skill_rmse = 1.0 - (rmse / base_rmse) if base_rmse > 0 else np.nan
             print(
                 f"Baseline (Climatology) → RMSE: {base_rmse:.4f} | NSE: {base_nse:.4f} | RMSE Skill vs Clim: {skill_rmse:.4f}"
             )
 
-        epoch_predictions_df = pd.DataFrame(epoch_predictions)
         station_metrics_df = compute_station_metrics(epoch_predictions_df)
         print_nse_distribution(station_metrics_df, "Epoch NSE Distribution (Model):")
 
@@ -263,9 +324,9 @@ def run_validation(
             persistence_df["predicted_swe"].values,
         )
         persist_skill = 1.0 - (rmse / persist_rmse) if persist_rmse > 0 else np.nan
-        print(
-            f"Baseline (Persistence) → RMSE: {persist_rmse:.4f} | NSE: {persist_nse:.4f} | RMSE Skill vs Persist: {persist_skill:.4f}"
-        )
+        #print(
+        #    f"Baseline (Persistence) → RMSE: {persist_rmse:.4f} | NSE: {persist_nse:.4f} | RMSE Skill vs Persist: {persist_skill:.4f}"
+        #)
 
         metrics.update(
             {
@@ -293,6 +354,8 @@ def run_test(
     device: torch.device,
     best_epoch: int,
     cfg,
+    conformal_q_hat: float = None,
+    conformal_alpha: float = None,
 ):
     """
     Standalone test function.
@@ -306,73 +369,24 @@ def run_test(
         print("No best model checkpoint found; using last epoch model.")
 
     print("\nRunning on TEST set...")
-    test_preds, test_targets, test_predictions = [], [], []
-    test_baseline_clim = []
+    test_preds = []
+    test_predictions_df = collect_predictions(
+        model=model,
+        loader=test_loader,
+        hist_mean_model=hist_mean_model,
+        swe_normalizers=swe_normalizers,
+        backtrans_cache=backtrans_cache,
+        station_index=station_index,
+        weights=weights,
+        swe_lookup=swe_lookup,
+        cfg=cfg,
+    )
 
-    model.eval()
-
-    with torch.no_grad():
-        for batch in test_loader:
-            X = batch["dynamic forcing"].to(device)
-            mask = batch["mask"]
-            stations = batch["station"]
-            dates = batch["dates"]
-
-            preds = model(X, stations=stations)
-            preds_base_clim = hist_mean_model(X, stations=stations, dates=dates)
-
-            if getattr(cfg, "anomaly_target", False):
-                if "swe_climo" not in batch:
-                    raise RuntimeError("anomaly_target=True but 'swe_climo' missing from batch.")
-                climo = batch["swe_climo"].to(device)
-            else:
-                climo = None
-
-            for i in range(len(stations)):
-                station = stations[i]
-                valid_timesteps = int(mask[i].sum().item())
-                swe_norm = swe_normalizers.get(station, None)
-
-                for t in range(valid_timesteps):
-                    date_str = pd.to_datetime(dates[i][t]).strftime("%Y-%m-%d")
-                    if date_str not in backtrans_cache:
-                        continue
-
-                    pred_prime = (preds[i, t] + climo[i, t]).item() if climo is not None else preds[i, t].item()
-
-                    z_hat = back_transform_scalar_with_weights(
-                        pred_prime=pred_prime,
-                        station_idx=station_index[station],
-                        date_str=date_str,
-                        weights=weights,
-                        backtrans_cache=backtrans_cache,
-                    )
-
-                    if swe_norm is not None:
-                        pred_value = swe_norm.inverse_transform(
-                            pd.DataFrame([[z_hat]], columns=["SWE"])
-                        )["SWE"].iloc[0]
-                    else:
-                        pred_value = z_hat
-
-                    actual_swe = swe_lookup.loc[(station, date_str)]
-                    base_clim_val = max(0.0, float(preds_base_clim[i, t].item()))
-
-                    test_preds.append(pred_value)
-                    test_targets.append(actual_swe)
-                    test_baseline_clim.append(base_clim_val)
-
-                    test_predictions.append(
-                        {
-                            "station": station,
-                            "date": date_str,
-                            "predicted_swe": pred_value,
-                            "baseline_swe": base_clim_val,
-                            "actual_swe": actual_swe,
-                        }
-                    )
-
-    if test_preds:
+    num_predictions = int(len(test_predictions_df))
+    if num_predictions > 0:
+        test_preds = test_predictions_df["predicted_swe"].values
+        test_targets = test_predictions_df["actual_swe"].values
+        test_baseline_clim = test_predictions_df["baseline_swe"].values
         rmse, nse, _ = compute_global_metrics(test_targets, test_preds)
 
         print(f"\nTEST Results (Best Epoch {best_epoch})")
@@ -380,11 +394,23 @@ def run_test(
         print(f"TEST NSE : {nse:.4f}")
         print(f"TEST Predictions: {len(test_preds)}")
 
-        test_predictions_df = pd.DataFrame(test_predictions)
+        if conformal_q_hat is not None:
+            test_predictions_df = add_conformal_intervals(test_predictions_df, conformal_q_hat)
+            coverage = float(test_predictions_df["conformal_covered"].mean())
+            interval_width = float(
+                (test_predictions_df["conformal_upper_swe"] - test_predictions_df["conformal_lower_swe"]).mean()
+            )
+            target_coverage = 1.0 - conformal_alpha if conformal_alpha is not None else np.nan
+            print("\nSplit-conformal intervals on TEST")
+            print(f"Target coverage: {target_coverage:.3f}")
+            print(f"Observed coverage: {coverage:.3f}")
+            print(f"q_hat: {conformal_q_hat:.4f}")
+            print(f"Mean interval width: {interval_width:.4f}")
+
         station_metrics_df = compute_station_metrics(test_predictions_df)
         print_nse_distribution(station_metrics_df, "Station-level NSE distribution (TEST, Model):")
 
-        if test_baseline_clim:
+        if len(test_baseline_clim) > 0:
             base_rmse, base_nse, _ = compute_global_metrics(test_targets, test_baseline_clim)
             skill_rmse = 1.0 - (rmse / base_rmse) if base_rmse > 0 else np.nan
 
@@ -409,10 +435,10 @@ def run_test(
         )
         persist_skill = 1.0 - (rmse / persist_rmse) if persist_rmse > 0 else np.nan
 
-        print("\nBaseline (Persistence) on TEST")
-        print(f"TEST Persistence RMSE: {persist_rmse:.4f}")
-        print(f"TEST Persistence NSE : {persist_nse:.4f}")
-        print(f"TEST RMSE Skill vs Persist: {persist_skill:.4f}")
+        #print("\nBaseline (Persistence) on TEST")
+        #print(f"TEST Persistence RMSE: {persist_rmse:.4f}")
+        #print(f"TEST Persistence NSE : {persist_nse:.4f}")
+        #print(f"TEST RMSE Skill vs Persist: {persist_skill:.4f}")
 
         persistence_metrics_df = compute_station_metrics(persistence_df)
         print_nse_distribution(
@@ -467,10 +493,11 @@ def run_test(
         print("Saved test station metrics (persistence) to results/test_station_metrics_persistence.csv")
 
     return {
-        "test_rmse": float(rmse) if test_preds else None,
-        "test_nse": float(nse) if test_preds else None,
-        "num_predictions": int(len(test_preds)),
+        "test_rmse": float(rmse) if num_predictions > 0 else None,
+        "test_nse": float(nse) if num_predictions > 0 else None,
+        "num_predictions": num_predictions,
         "best_epoch": int(best_epoch),
+        "conformal_q_hat": float(conformal_q_hat) if conformal_q_hat is not None else None,
     }
 
 
@@ -538,6 +565,7 @@ def train_model(cfg: SimpleNamespace):
     best_val_nse = float("-inf")
     best_epoch = -1
     best_model_state = None
+    conformal_alpha = float(getattr(cfg, "conformal_alpha", 0.1))
 
     for epoch in range(cfg.n_epochs):
         epoch_start = time.time()
@@ -616,10 +644,36 @@ def train_model(cfg: SimpleNamespace):
             if nse > best_val_nse:
                 best_val_nse = nse
                 best_epoch = epoch + 1
-                best_model_state = model.state_dict()
+                best_model_state = {
+                    key: value.detach().cpu().clone()
+                    for key, value in model.state_dict().items()
+                }
                 os.makedirs("results", exist_ok=True)
                 torch.save(best_model_state, "results/best_model.pt")
                 print(f"*** New best model saved (Epoch {best_epoch}, Val NSE = {best_val_nse:.4f}) ***")
+
+    print("\nCalibrating split-conformal intervals on VALIDATION set...")
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
+    elif os.path.exists("results/best_model.pt"):
+        model.load_state_dict(torch.load("results/best_model.pt", map_location=device))
+
+    calibration_df = collect_predictions(
+        model=model,
+        loader=val_loader,
+        hist_mean_model=hist_mean_model,
+        swe_normalizers=swe_normalizers,
+        backtrans_cache=backtrans_cache,
+        station_index=station_index,
+        weights=weights,
+        swe_lookup=swe_lookup,
+        cfg=cfg,
+    )
+    conformal_q_hat = conformal_quantile(calibration_df, conformal_alpha)
+    print(
+        f"Validation calibration residual quantile "
+        f"(alpha={conformal_alpha:.3f}, target coverage={1.0 - conformal_alpha:.3f}): {conformal_q_hat:.4f}"
+    )
 
     test_results = run_test(
         model=model,
@@ -634,6 +688,8 @@ def train_model(cfg: SimpleNamespace):
         device=device,
         best_epoch=best_epoch,
         cfg=cfg,
+        conformal_q_hat=conformal_q_hat,
+        conformal_alpha=conformal_alpha,
     )
 
     total_time = time.time() - total_start_time

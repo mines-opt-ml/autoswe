@@ -30,7 +30,7 @@ M: 10
 ncores: 1
 device: cuda:0
 shuffle: true
-seed: 42
+seed: 17
 deterministic: true
 save: true
 save_path: results/model.pt
@@ -38,3 +38,4 @@ loss: [MSE] #options: MSE, NSE, or [MSE, NSE]
 loss_weights: [1.0] #if [MSE, NSE] loss, insert desired [MSEweight, NSEweight] here
 normalization: "zscore"   #options: zscore, minmax
 use_anomaly_target: false
+conformal_alpha: 0.1      #split-conformal miscoverage rate; 0.1 gives nominal 90% intervals
