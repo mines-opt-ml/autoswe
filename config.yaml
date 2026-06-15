@@ -22,7 +22,7 @@ hidden_size: 256
 num_layers: 4
 batch_size: 512
 lr: 0.001
-n_epochs: 10
+n_epochs: 1
 smoothness: 1.0
 range_param: 2.0
 nugget: 0.1
