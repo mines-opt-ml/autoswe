@@ -23,8 +23,15 @@ class SWEStationDataset(Dataset):
 
         self.beginning_of_snow_year = self.cfg.beginning_of_snow_year
         self.end_of_snow_year = self.cfg.end_of_snow_year
-        self.global_start_year = min(self.cfg.train_start_year, self.cfg.val_start_year, self.cfg.test_start_year)
-        self.global_end_year = max(self.cfg.train_end_year, self.cfg.val_end_year, self.cfg.test_end_year)
+        conformal_cfg = getattr(self.cfg, "conformal", None)
+        conformal_enabled = bool(getattr(conformal_cfg, "enabled", False))
+        start_years = [self.cfg.train_start_year, self.cfg.val_start_year, self.cfg.test_start_year]
+        end_years = [self.cfg.train_end_year, self.cfg.val_end_year, self.cfg.test_end_year]
+        if conformal_enabled:
+            start_years.append(conformal_cfg.calibration_start_year)
+            end_years.append(conformal_cfg.calibration_end_year)
+        self.global_start_year = min(start_years)
+        self.global_end_year = max(end_years)
         self.dynamic_forcing_and_swe, self.snotel_attributes = preprocess(cfg)
 
         self.dynamic_forcing_and_swe = self.dynamic_forcing_and_swe.apply(

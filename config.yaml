@@ -12,9 +12,9 @@ lag_days: 0
 beginning_of_snow_year: "10-01"
 end_of_snow_year: "06-30"
 train_start_year: 2001
-train_end_year: 2012
-val_start_year: 2013
-val_end_year: 2015
+train_end_year: 2011
+val_start_year: 2012
+val_end_year: 2013
 test_start_year: 2016
 test_end_year: 2019
 hidden_dims: [128, 64]
@@ -22,12 +22,13 @@ hidden_size: 256
 num_layers: 4
 batch_size: 512
 lr: 0.001
-n_epochs: 1
+n_epochs: 10
 smoothness: 1.0
 range_param: 2.0
 nugget: 0.1
 M: 10
 ncores: 1
+spatial_decorrelation: true
 device: cuda:0
 shuffle: true
 seed: 17
@@ -38,4 +39,12 @@ loss: [MSE] #options: MSE, NSE, or [MSE, NSE]
 loss_weights: [1.0] #if [MSE, NSE] loss, insert desired [MSEweight, NSEweight] here
 normalization: "zscore"   #options: zscore, minmax
 use_anomaly_target: false
-conformal_alpha: 0.1      #split-conformal miscoverage rate; 0.1 gives nominal 90% intervals
+conformal:
+  enabled: true
+  alpha: 0.1              #conformal prediction provides nominal (1-alpha)*100% coverage
+  split: calibration
+  calibration_start_year: 2014
+  calibration_end_year: 2015
+  group_by: snow_day
+  min_calibration_points: 30
+  fallback: global

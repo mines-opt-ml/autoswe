@@ -16,7 +16,18 @@ from modelzoo.HistoricalMean import HistoricalMean
 from modelzoo.LSTM import SWE_Net
 from utils.backtransform import back_transform_scalar_with_weights
 from utils.metrics import masked_mse, masked_nse
+from utils.snowyear_DOY_conversion import compute_day_of_snow_year
 from dataset import SWEStationDataset
+
+
+def namespace_from_mapping(value):
+    if isinstance(value, dict):
+        return SimpleNamespace(
+            **{key: namespace_from_mapping(item) for key, item in value.items()}
+        )
+    if isinstance(value, list):
+        return [namespace_from_mapping(item) for item in value]
+    return value
 
 
 def set_seed(seed: int, deterministic: bool = False):
@@ -171,6 +182,7 @@ def collect_predictions(
     Run a loader and return row-level predictions on the original SWE scale.
     """
     device = next(model.parameters()).device
+    use_spatial_decorrelation = getattr(cfg, "spatial_decorrelation", True)
     model.eval()
 
     predictions = []
@@ -199,18 +211,24 @@ def collect_predictions(
 
                 for t in range(valid_timesteps):
                     date_str = pd.to_datetime(dates[i][t]).strftime("%Y-%m-%d")
-                    if date_str not in backtrans_cache:
+                    if (
+                        use_spatial_decorrelation
+                        and date_str not in backtrans_cache
+                    ):
                         continue
 
                     pred_prime = (preds[i, t] + climo[i, t]).item() if climo is not None else preds[i, t].item()
 
-                    z_hat = back_transform_scalar_with_weights(
-                        pred_prime=pred_prime,
-                        station_idx=station_index[station],
-                        date_str=date_str,
-                        weights=weights,
-                        backtrans_cache=backtrans_cache,
-                    )
+                    if use_spatial_decorrelation:
+                        z_hat = back_transform_scalar_with_weights(
+                            pred_prime=pred_prime,
+                            station_idx=station_index[station],
+                            date_str=date_str,
+                            weights=weights,
+                            backtrans_cache=backtrans_cache,
+                        )
+                    else:
+                        z_hat = pred_prime
 
                     if swe_norm is not None:
                         pred_value = swe_norm.inverse_transform(
@@ -222,10 +240,16 @@ def collect_predictions(
                     actual_swe = swe_lookup.loc[(station, date_str)]
                     base_clim_val = max(0.0, float(preds_base_clim[i, t].item()))
 
+                    snow_day = compute_day_of_snow_year(
+                        pd.Timestamp(date_str),
+                        cfg.beginning_of_snow_year,
+                    )
+
                     predictions.append(
                         {
                             "station": station,
                             "date": date_str,
+                            "snow_day": snow_day,
                             "predicted_swe": pred_value,
                             "baseline_swe": base_clim_val,
                             "actual_swe": actual_swe,
@@ -242,51 +266,108 @@ def conformal_quantile(calibration_df: pd.DataFrame, alpha: float) -> float:
     if calibration_df.empty:
         raise ValueError("Cannot compute conformal quantile from an empty calibration set.")
     if not 0.0 < alpha < 1.0:
-        raise ValueError(f"conformal_alpha must be between 0 and 1, got {alpha}.")
+        raise ValueError(f"conformal.alpha must be between 0 and 1, got {alpha}.")
 
     residuals = np.abs(
         calibration_df["actual_swe"].to_numpy(dtype=float)
         - calibration_df["predicted_swe"].to_numpy(dtype=float)
     )
     n = len(residuals)
-    q_level = min(1.0, np.ceil((n + 1) * (1.0 - alpha)) / n)
-    return float(np.quantile(residuals, q_level, method="higher"))
+    rank = int(np.ceil((n + 1) * (1.0 - alpha)))
+    rank = min(rank, n)
+    return float(np.sort(residuals)[rank - 1])
 
 
-def conformal_quantiles_by_station(calibration_df: pd.DataFrame, alpha: float) -> dict:
+def conformal_quantiles_by_group(calibration_df: pd.DataFrame, group_col: str, alpha: float,    
+    min_calibration_points: int = 1, fallback_q_hat: float = None,
+) -> dict:
     """
-    Split-conformal absolute residual quantiles computed independently per station.
+    Split-conformal absolute residual quantiles computed independently per group.
     """
-    if "station" not in calibration_df:
-        raise ValueError("Calibration dataframe must include a 'station' column.")
+    if group_col not in calibration_df:
+        raise ValueError(f"Calibration dataframe must include a '{group_col}' column.")
+    if min_calibration_points < 1:
+        raise ValueError("min_calibration_points must be at least 1.")
+    if fallback_q_hat is None:
+        fallback_q_hat = conformal_quantile(calibration_df, alpha)
 
-    return {
-        station: conformal_quantile(station_df, alpha)
-        for station, station_df in calibration_df.groupby("station")
-    }
+    q_hats = {}
+    for group_value, group_df in calibration_df.groupby(group_col):
+        if len(group_df) < min_calibration_points:
+            q_hats[group_value] = fallback_q_hat
+        else:
+            q_hats[group_value] = conformal_quantile(group_df, alpha)
+    return q_hats
+
+
+def build_conformal_residuals_df(
+    calibration_df: pd.DataFrame,
+    q_hat_by_group: Mapping[object, float],
+    group_col: str,
+    fallback_q_hat: float = None,
+) -> pd.DataFrame:
+    """
+    Build a row-level record of the validation residuals used for calibration.
+    """
+    columns = ["station", "date", group_col, "actual_swe", "predicted_swe"]
+    missing_columns = [column for column in columns if column not in calibration_df]
+    if missing_columns:
+        raise ValueError(
+            "Calibration dataframe is missing required column(s): "
+            + ", ".join(missing_columns)
+        )
+
+    residuals_df = calibration_df[columns].copy()
+    residuals_df["residual"] = (
+        residuals_df["actual_swe"] - residuals_df["predicted_swe"]
+    )
+    residuals_df["absolute_residual"] = residuals_df["residual"].abs()
+    residuals_df["conformal_q_hat"] = residuals_df[group_col].map(q_hat_by_group)
+    if fallback_q_hat is not None:
+        residuals_df["conformal_q_hat"] = residuals_df["conformal_q_hat"].fillna(fallback_q_hat)
+    residuals_df = residuals_df.sort_values([group_col, "station", "date"]).reset_index(drop=True)
+    residuals_df["group_residual_index"] = (
+        residuals_df.groupby(group_col).cumcount()
+    )
+    return residuals_df[
+        [
+            "station",
+            "date",
+            group_col,
+            "group_residual_index",
+            "actual_swe",
+            "predicted_swe",
+            "residual",
+            "absolute_residual",
+            "conformal_q_hat",
+        ]
+    ]
 
 
 def add_conformal_intervals(
     predictions_df: pd.DataFrame,
-    q_hat_by_station: Mapping[str, float],
+    q_hat_by_group: Mapping[object, float],
+    group_col: str,
     fallback_q_hat: float = None,
 ) -> pd.DataFrame:
     """
-    Attach station-specific nonnegative lower and upper split-conformal SWE intervals.
+    Attach group-specific lower and upper split-conformal SWE intervals.
     """
+    if group_col not in predictions_df:
+        raise ValueError(f"Predictions dataframe must include a '{group_col}' column.")
     df = predictions_df.copy()
-    df["conformal_q_hat"] = df["station"].map(q_hat_by_station)
+    df["conformal_q_hat"] = df[group_col].map(q_hat_by_group)
     if fallback_q_hat is not None:
         df["conformal_q_hat"] = df["conformal_q_hat"].fillna(fallback_q_hat)
     if df["conformal_q_hat"].isna().any():
-        missing_stations = sorted(df.loc[df["conformal_q_hat"].isna(), "station"].unique())
+        missing_groups = sorted(df.loc[df["conformal_q_hat"].isna(), group_col].unique())
         raise ValueError(
-            "Missing conformal quantile for station(s): "
-            + ", ".join(str(station) for station in missing_stations)
+            f"Missing conformal quantile for {group_col} value(s): "
+            + ", ".join(str(group) for group in missing_groups)
         )
 
     q_hat = df["conformal_q_hat"].to_numpy(dtype=float)
-    df["conformal_lower_swe"] = np.maximum(0.0, df["predicted_swe"] - q_hat)
+    df["conformal_lower_swe"] = df["predicted_swe"] - q_hat
     df["conformal_upper_swe"] = df["predicted_swe"] + q_hat
     covered = (
         (df["actual_swe"] >= df["conformal_lower_swe"])
@@ -382,9 +463,10 @@ def run_test(
     device: torch.device,
     best_epoch: int,
     cfg,
-    conformal_q_hat_by_station: Mapping[str, float] = None,
+    conformal_q_hat_by_group: Mapping[object, float] = None,
     conformal_global_q_hat: float = None,
     conformal_alpha: float = None,
+    conformal_group_col: str = None,
 ):
     """
     Standalone test function.
@@ -423,10 +505,11 @@ def run_test(
         print(f"TEST NSE : {nse:.4f}")
         print(f"TEST Predictions: {len(test_preds)}")
 
-        if conformal_q_hat_by_station is not None:
+        if conformal_q_hat_by_group is not None:
             test_predictions_df = add_conformal_intervals(
                 test_predictions_df,
-                conformal_q_hat_by_station,
+                conformal_q_hat_by_group,
+                conformal_group_col,
                 fallback_q_hat=conformal_global_q_hat,
             )
             coverage = float(test_predictions_df["conformal_covered"].mean())
@@ -434,14 +517,14 @@ def run_test(
                 (test_predictions_df["conformal_upper_swe"] - test_predictions_df["conformal_lower_swe"]).mean()
             )
             station_coverage = test_predictions_df.groupby("station")["conformal_covered"].mean()
-            q_hats = np.array(list(conformal_q_hat_by_station.values()), dtype=float)
+            q_hats = np.array(list(conformal_q_hat_by_group.values()), dtype=float)
             target_coverage = 1.0 - conformal_alpha if conformal_alpha is not None else np.nan
-            print("\nStation-specific split-conformal intervals on TEST")
+            print(f"\nSplit-conformal intervals by {conformal_group_col} on TEST")
             print(f"Target coverage: {target_coverage:.3f}")
             print(f"Observed coverage: {coverage:.3f}")
             print(f"Median station coverage: {station_coverage.median():.3f}")
-            print(f"Station q_hat median: {np.median(q_hats):.4f}")
-            print(f"Station q_hat range: {np.min(q_hats):.4f} to {np.max(q_hats):.4f}")
+            print(f"{conformal_group_col} q_hat median: {np.median(q_hats):.4f}")
+            print(f"{conformal_group_col} q_hat range: {np.min(q_hats):.4f} to {np.max(q_hats):.4f}")
             print(f"Mean interval width: {interval_width:.4f}")
 
         station_metrics_df = compute_station_metrics(test_predictions_df)
@@ -478,10 +561,10 @@ def run_test(
         #print(f"TEST RMSE Skill vs Persist: {persist_skill:.4f}")
 
         persistence_metrics_df = compute_station_metrics(persistence_df)
-        print_nse_distribution(
-            persistence_metrics_df,
-            "Station-level NSE distribution (TEST, Baseline / Persistence):",
-        )
+        #print_nse_distribution(
+        #    persistence_metrics_df,
+        #    "Station-level NSE distribution (TEST, Baseline / Persistence):",
+        # )
 
         output_dir = os.path.join(os.path.dirname(__file__), "results")
         os.makedirs(output_dir, exist_ok=True)
@@ -489,15 +572,15 @@ def run_test(
         test_predictions_df.to_csv(os.path.join(output_dir, "test_predictions.csv"), index=False)
         station_metrics_df.to_csv(os.path.join(output_dir, "test_station_metrics.csv"), index=False)
 
-        if conformal_q_hat_by_station is not None:
+        if conformal_q_hat_by_group is not None:
             conformal_q_hat_df = pd.DataFrame(
                 [
-                    {"station": station, "conformal_q_hat": q_hat}
-                    for station, q_hat in sorted(conformal_q_hat_by_station.items())
+                    {conformal_group_col: group, "conformal_q_hat": q_hat}
+                    for group, q_hat in sorted(conformal_q_hat_by_group.items())
                 ]
             )
             conformal_q_hat_df.to_csv(
-                os.path.join(output_dir, "conformal_q_hat_by_station.csv"),
+                os.path.join(output_dir, f"conformal_q_hat_by_{conformal_group_col}.csv"),
                 index=False,
             )
 
@@ -536,8 +619,11 @@ def run_test(
 
         print("Saved test predictions to results/test_predictions.csv")
         print("Saved test station metrics to results/test_station_metrics.csv")
-        if conformal_q_hat_by_station is not None:
-            print("Saved station-specific conformal q_hats to results/conformal_q_hat_by_station.csv")
+        if conformal_q_hat_by_group is not None:
+            print(
+                f"Saved conformal q_hats to "
+                f"results/conformal_q_hat_by_{conformal_group_col}.csv"
+            )
         print("Saved test predictions (+ baseline) to results/test_predictions_with_baseline.csv")
         print("Saved test station metrics (baseline) to results/test_station_metrics_baseline.csv")
         print("Saved test predictions (persistence) to results/test_predictions_persistence.csv")
@@ -548,12 +634,13 @@ def run_test(
         "test_nse": float(nse) if num_predictions > 0 else None,
         "num_predictions": num_predictions,
         "best_epoch": int(best_epoch),
-        "conformal_q_hat_by_station": (
-            dict(conformal_q_hat_by_station)
-            if conformal_q_hat_by_station is not None
+        "conformal_q_hat_by_group": (
+            dict(conformal_q_hat_by_group)
+            if conformal_q_hat_by_group is not None
             else None
         ),
         "conformal_global_q_hat": float(conformal_global_q_hat) if conformal_global_q_hat is not None else None,
+        "conformal_group_col": conformal_group_col,
     }
 
 
@@ -563,6 +650,8 @@ def train_model(cfg: SimpleNamespace):
 
     total_start_time = time.time()
     device = torch.device(cfg.device)
+    conformal_cfg = getattr(cfg, "conformal", SimpleNamespace(enabled=False))
+    conformal_enabled = bool(getattr(conformal_cfg, "enabled", False))
 
     dataset = SWEStationDataset(cfg)
     orig_swe = dataset.obs_swe.copy()
@@ -576,17 +665,28 @@ def train_model(cfg: SimpleNamespace):
         train_end=cfg.train_end_year,
     )
 
-    dataloader = SWEDataLoader(cfg)
-    train_loader, val_loader, test_loader, _, bt_info = dataloader.prepare()
+    use_spatial_decorrelation = getattr(cfg, "spatial_decorrelation", True)
+    mode_name = "spatially decorrelated" if use_spatial_decorrelation else "direct nonspatial"
+    print(f"\nPreparing {mode_name} LSTM pipeline...")
+
+    dataloader = SWEDataLoader(cfg, dataset=dataset)
+    loaders, _, bt_info = dataloader.prepare()
+    train_loader = loaders["train"]
+    val_loader = loaders["val"]
+    calibration_loader = loaders["calibration"]
+    test_loader = loaders["test"]
     station_index = bt_info["station_index"]
     weights = bt_info["weights"]
 
-    backtrans_cache = build_backtrans_cache_normalized_from_obs(
-        obs_swe=dataset.obs_swe,
-        swe_normalizers=swe_normalizers,
-        station_index=station_index,
-        weights=weights,
-    )
+    if use_spatial_decorrelation:
+        backtrans_cache = build_backtrans_cache_normalized_from_obs(
+            obs_swe=dataset.obs_swe,
+            swe_normalizers=swe_normalizers,
+            station_index=station_index,
+            weights=weights,
+        )
+    else:
+        backtrans_cache = None
 
     target_swe = dataset.obs_swe.copy()
     target_swe["Date"] = pd.to_datetime(target_swe["Date"])
@@ -621,7 +721,12 @@ def train_model(cfg: SimpleNamespace):
     best_val_nse = float("-inf")
     best_epoch = -1
     best_model_state = None
-    conformal_alpha = float(getattr(cfg, "conformal_alpha", 0.1))
+    conformal_alpha = float(getattr(conformal_cfg, "alpha", 0.1))
+    conformal_group_col = getattr(conformal_cfg, "group_by", "snow_day")
+    conformal_min_calibration_points = int(
+        getattr(conformal_cfg, "min_calibration_points", 1)
+    )
+    conformal_fallback = getattr(conformal_cfg, "fallback", "global")
 
     for epoch in range(cfg.n_epochs):
         epoch_start = time.time()
@@ -708,36 +813,67 @@ def train_model(cfg: SimpleNamespace):
                 torch.save(best_model_state, "results/best_model.pt")
                 print(f"*** New best model saved (Epoch {best_epoch}, Val NSE = {best_val_nse:.4f}) ***")
 
-    print("\nCalibrating split-conformal intervals on VALIDATION set...")
-    if best_model_state is not None:
-        model.load_state_dict(best_model_state)
-    elif os.path.exists("results/best_model.pt"):
-        model.load_state_dict(torch.load("results/best_model.pt", map_location=device))
+    conformal_global_q_hat = None
+    conformal_q_hat_by_group = None
 
-    calibration_df = collect_predictions(
-        model=model,
-        loader=val_loader,
-        hist_mean_model=hist_mean_model,
-        swe_normalizers=swe_normalizers,
-        backtrans_cache=backtrans_cache,
-        station_index=station_index,
-        weights=weights,
-        swe_lookup=swe_lookup,
-        cfg=cfg,
-    )
-    conformal_global_q_hat = conformal_quantile(calibration_df, conformal_alpha)
-    conformal_q_hat_by_station = conformal_quantiles_by_station(calibration_df, conformal_alpha)
-    station_q_hats = np.array(list(conformal_q_hat_by_station.values()), dtype=float)
-    print(
-        f"Validation station-specific calibration residual quantiles "
-        f"(alpha={conformal_alpha:.3f}, target coverage={1.0 - conformal_alpha:.3f})"
-    )
-    print(
-        f"Stations calibrated: {len(conformal_q_hat_by_station)} | "
-        f"median q_hat: {np.median(station_q_hats):.4f} | "
-        f"range: {np.min(station_q_hats):.4f} to {np.max(station_q_hats):.4f} | "
-        f"global fallback q_hat: {conformal_global_q_hat:.4f}"
-    )
+    if conformal_enabled:
+        if calibration_loader is None:
+            raise RuntimeError("conformal.enabled=True but no calibration loader was created.")
+        if conformal_fallback != "global":
+            raise ValueError("Only conformal.fallback='global' is currently supported.")
+
+        print("\nCalibrating split-conformal intervals on CALIBRATION set...")
+        if best_model_state is not None:
+            model.load_state_dict(best_model_state)
+        elif os.path.exists("results/best_model.pt"):
+            model.load_state_dict(torch.load("results/best_model.pt", map_location=device))
+
+        calibration_df = collect_predictions(
+            model=model,
+            loader=calibration_loader,
+            hist_mean_model=hist_mean_model,
+            swe_normalizers=swe_normalizers,
+            backtrans_cache=backtrans_cache,
+            station_index=station_index,
+            weights=weights,
+            swe_lookup=swe_lookup,
+            cfg=cfg,
+        )
+        conformal_global_q_hat = conformal_quantile(calibration_df, conformal_alpha)
+        conformal_q_hat_by_group = conformal_quantiles_by_group(
+            calibration_df,
+            group_col=conformal_group_col,
+            alpha=conformal_alpha,
+            min_calibration_points=conformal_min_calibration_points,
+            fallback_q_hat=conformal_global_q_hat,
+        )
+        conformal_residuals_df = build_conformal_residuals_df(
+            calibration_df,
+            conformal_q_hat_by_group,
+            group_col=conformal_group_col,
+            fallback_q_hat=conformal_global_q_hat,
+        )
+        output_dir = os.path.join(os.path.dirname(__file__), "results")
+        os.makedirs(output_dir, exist_ok=True)
+        conformal_residuals_df.to_csv(
+            os.path.join(output_dir, f"conformal_residuals_by_{conformal_group_col}.csv"),
+            index=False,
+        )
+        group_q_hats = np.array(list(conformal_q_hat_by_group.values()), dtype=float)
+        print(
+            f"Calibration residual quantiles by {conformal_group_col} "
+            f"(alpha={conformal_alpha:.3f}, target coverage={1.0 - conformal_alpha:.3f})"
+        )
+        print(
+            f"Groups calibrated: {len(conformal_q_hat_by_group)} | "
+            f"median q_hat: {np.median(group_q_hats):.4f} | "
+            f"range: {np.min(group_q_hats):.4f} to {np.max(group_q_hats):.4f} | "
+            f"global fallback q_hat: {conformal_global_q_hat:.4f}"
+        )
+        print(
+            f"Saved calibration residuals to "
+            f"results/conformal_residuals_by_{conformal_group_col}.csv"
+        )
 
     test_results = run_test(
         model=model,
@@ -752,9 +888,10 @@ def train_model(cfg: SimpleNamespace):
         device=device,
         best_epoch=best_epoch,
         cfg=cfg,
-        conformal_q_hat_by_station=conformal_q_hat_by_station,
+        conformal_q_hat_by_group=conformal_q_hat_by_group,
         conformal_global_q_hat=conformal_global_q_hat,
-        conformal_alpha=conformal_alpha,
+        conformal_alpha=conformal_alpha if conformal_enabled else None,
+        conformal_group_col=conformal_group_col if conformal_enabled else None,
     )
 
     total_time = time.time() - total_start_time
@@ -776,7 +913,7 @@ if __name__ == "__main__":
     with open(args.config, "r") as f:
         cfg_dict = yaml.safe_load(f)
 
-    cfg = SimpleNamespace(**cfg_dict)
+    cfg = namespace_from_mapping(cfg_dict)
     model, test_results, total_time = train_model(cfg)
 
     import csv
